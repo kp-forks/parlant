@@ -1222,6 +1222,10 @@ class AlphaEngine(Engine):
             if g.enabled
         }
 
+        # Cache usable guidelines on the context so they're available for
+        # later resolution passes (e.g. _inject_transient_guidelines).
+        context.state.usable_guidelines = list(all_stored_guidelines.values())
+
         # Step 3: Exclude guidelines whose prerequisite journeys are less likely to be activated
         # (everything beyond the first `top_k` journeys), and also remove all journey graph guidelines.
         # Removing these guidelines
@@ -1316,15 +1320,9 @@ class AlphaEngine(Engine):
             agent_id=context.agent.id,
         )
 
-        # Step 2 : Retrieve all the guidelines for this agent the journeys that are enabled
-        all_stored_guidelines = {
-            g.id: g
-            for g in await self._entity_queries.find_guidelines_for_context(
-                agent_id=context.agent.id,
-                journeys=all_journeys,
-            )
-            if g.enabled
-        }
+        # Step 2: Reuse the usable guidelines cached during the initial iteration.
+        # Tools do not create or modify stored guidelines, so the set is stable.
+        all_stored_guidelines = {g.id: g for g in context.state.usable_guidelines}
 
         # Step 3: Retrieve guidelines that need reevaluation based on tool calls made
         # in case no guidelines need reevaluation, we can skip the rest of the steps.
@@ -1955,10 +1953,11 @@ class AlphaEngine(Engine):
 
         # Re-apply full relational resolution now that tool guidelines (which may
         # carry their own priority) have been injected into the combined match set.
+        # Use the full usable_guidelines cached during preparation for correct
+        # tag indexing (TAG_ALL needs to see all members, not just matched ones).
         if tool_guideline_matches:
-            all_guidelines = [m.guideline for m in context.state.ordinary_guideline_matches]
             resolver_result = await self._relational_resolver.resolve(
-                usable_guidelines=all_guidelines,
+                usable_guidelines=context.state.usable_guidelines,
                 matches=context.state.ordinary_guideline_matches,
                 journeys=context.state.journeys,
             )

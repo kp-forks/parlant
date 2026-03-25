@@ -521,6 +521,10 @@ async def test_that_relational_resolver_infers_guidelines_from_tags(
     await guideline_store.upsert_tag(guideline_id=g2.id, tag_id=t1.id)
     await guideline_store.upsert_tag(guideline_id=g3.id, tag_id=t1.id)
 
+    # Re-read after tagging so usable_guidelines has up-to-date tag lists
+    g2 = await guideline_store.read_guideline(g2.id)
+    g3 = await guideline_store.read_guideline(g3.id)
+
     await relationship_store.create_relationship(
         source=RelationshipEntity(
             id=g1.id,
@@ -780,6 +784,10 @@ async def test_that_relational_resolver_keeps_guideline_depending_on_tag_when_at
 
     await guideline_store.upsert_tag(tagged_guideline_1.id, target_tag.id)
     await guideline_store.upsert_tag(tagged_guideline_2.id, target_tag.id)
+
+    # Re-read after tagging so usable_guidelines has up-to-date tag lists
+    tagged_guideline_1 = await guideline_store.read_guideline(tagged_guideline_1.id)
+    tagged_guideline_2 = await guideline_store.read_guideline(tagged_guideline_2.id)
 
     await relationship_store.create_relationship(
         source=RelationshipEntity(
@@ -4942,3 +4950,271 @@ async def test_that_shared_target_in_dependency_all_and_dependency_any_filters_w
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
+
+
+async def test_that_numerical_priority_does_not_filter_entailer_when_entailed_has_higher_priority(
+    container: Container,
+) -> None:
+    """
+    G1 (priority 0) entails G2 (priority 100). G1 matched, G2 not initially matched.
+    Numerical priority runs before entailment: only G1 present, nothing filtered.
+    Then entailment adds G2. Both survive.
+    Result: {G1, G2}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action", priority=0)
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action", priority=100)
+
+    # G1 entails G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            # G2 NOT initially matched — should be added via entailment
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id}
+
+
+async def test_that_chained_entailment_activates_all_linked_guidelines(
+    container: Container,
+) -> None:
+    """
+    G1 entails G2, G2 entails G3. Only G1 matched.
+    Entailment should activate G2 (from G1), then G3 (from G2).
+    Result: {G1, G2, G3}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
+
+    # G1 entails G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    # G2 entails G3
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            # G2 and G3 NOT initially matched
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id, g3.id}
+
+
+async def test_that_entailed_guideline_is_filtered_when_its_dependency_is_unmet(
+    container: Container,
+) -> None:
+    """
+    G1 entails G2. G2 depends on G3. G1 matched, G3 NOT matched.
+    G2 is entailed but its dependency on G3 is unmet → G2 filtered.
+    Result: {G1}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
+
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.DEPENDENCY,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            # G2 not initially matched (entailed by G1)
+            # G3 NOT matched
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id}
+
+
+async def test_that_entailed_guideline_survives_when_its_dependency_any_group_is_met(
+    container: Container,
+) -> None:
+    """
+    G1 entails G2. G2 depend_on_any(G3, G4). G1 and G3 matched.
+    G2 entailed, OR group met via G3 → G2 survives.
+    Result: {G1, G2, G3}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
+    g4 = await guideline_store.create_guideline(condition="d", action="g4 action")
+
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    group_id = "entailed-or-group"
+    for target in [g3, g4]:
+        await relationship_store.create_relationship(
+            source=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+            target=RelationshipEntity(id=target.id, kind=RelationshipEntityKind.GUIDELINE),
+            kind=RelationshipKind.DEPENDENCY_ANY,
+            group_id=group_id,
+        )
+
+    result = await resolver.resolve(
+        [g1, g2, g3, g4],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            # G2 not initially matched (entailed)
+            GuidelineMatch(guideline=g3, score=10, rationale=""),
+            # G4 NOT matched
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id, g3.id}
+
+
+async def test_that_relational_priority_on_dependency_any_target_does_not_break_group_when_sibling_survives(
+    container: Container,
+) -> None:
+    """
+    G1 depend_on_any(G2, G3). G4 prioritizes over G2 (relational).
+    All matched. G2 deprioritized → OR group still met via G3.
+    Result: {G1, G3, G4}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
+    g4 = await guideline_store.create_guideline(condition="d", action="g4 action")
+
+    group_id = "prio-or-group"
+    for target in [g2, g3]:
+        await relationship_store.create_relationship(
+            source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+            target=RelationshipEntity(id=target.id, kind=RelationshipEntityKind.GUIDELINE),
+            kind=RelationshipKind.DEPENDENCY_ANY,
+            group_id=group_id,
+        )
+
+    # G4 prioritizes over G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g4.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3, g4],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            GuidelineMatch(guideline=g2, score=10, rationale=""),
+            GuidelineMatch(guideline=g3, score=10, rationale=""),
+            GuidelineMatch(guideline=g4, score=10, rationale=""),
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g3.id, g4.id}
+
+
+async def test_that_dependency_any_group_with_tag_all_target_succeeds_when_all_members_matched(
+    container: Container,
+) -> None:
+    """
+    G1 depend_on_any(AllOf(tag=T1), G4).
+    T1 has G2 and G3, both matched → AllOf(T1) succeeds.
+    OR group met via the tag target (G4 not needed).
+    Result: {G1, G2, G3}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    tag_store = container[TagStore]
+    resolver = container[RelationalResolver]
+
+    t1 = await tag_store.create_tag(name="t1")
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action", tags=[t1.id])
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action", tags=[t1.id])
+    g4 = await guideline_store.create_guideline(condition="d", action="g4 action")
+
+    group_id = "tag-all-success-group"
+
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=t1.id, kind=RelationshipEntityKind.TAG_ALL),
+        kind=RelationshipKind.DEPENDENCY_ANY,
+        group_id=group_id,
+    )
+
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g4.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.DEPENDENCY_ANY,
+        group_id=group_id,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3, g4],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            GuidelineMatch(guideline=g2, score=10, rationale=""),
+            GuidelineMatch(guideline=g3, score=10, rationale=""),
+            # G4 NOT matched — but AllOf(T1) succeeds so OR group is met
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id, g3.id}
