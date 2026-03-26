@@ -38,7 +38,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, Sequence, cast
+from typing import Optional, Sequence, TypeAlias, cast
 
 from parlant.core.common import JSONSerializable
 from parlant.core.journeys import Journey, JourneyId
@@ -66,8 +66,54 @@ _RelationshipCache = dict[_CacheKey, list[Relationship]]
 
 
 # ---------------------------------------------------------------------------
-# Public result type
+# Public result types
 # ---------------------------------------------------------------------------
+
+#: Union of entity IDs that can appear as resolver map keys or targets.
+ResolvedEntityId: TypeAlias = GuidelineId | JourneyId
+
+
+class ResolutionKind(str, Enum):
+    """The type of decision the resolver made about an entity."""
+
+    NONE = "none"
+    """No relational changes — the entity passed through as-is."""
+
+    UNMET_DEPENDENCY_ALL = "unmet_dependency_all"
+    """Removed: a ``depend_on()`` target was not active (AND semantics)."""
+
+    UNMET_DEPENDENCY_ANY = "unmet_dependency_any"
+    """Removed: all targets in a ``depend_on_any()`` OR group were inactive."""
+
+    DEPRIORITIZED = "deprioritized"
+    """Removed: a higher-priority entity took precedence (relational,
+    numerical, or transitive)."""
+
+    ENTAILED = "entailed"
+    """Added: activated via an entailment relationship from a matched guideline."""
+
+
+@dataclass(frozen=True)
+class ResolutionDetails:
+    """Structured information about why a resolution decision was made."""
+
+    description: str
+    """Human-readable explanation."""
+
+    relationship_id: RelationshipId | None = None
+    """The relationship that caused this resolution, if applicable."""
+
+    target_ids: tuple[ResolvedEntityId | TagId, ...] = ()
+    """The entity IDs involved — e.g. the unmet dependency targets,
+    the prioritizing entity, or the entailing guideline."""
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """A single decision the resolver made about an entity."""
+
+    kind: ResolutionKind
+    details: ResolutionDetails
 
 
 @dataclass
@@ -86,6 +132,12 @@ class RelationalResolverResult:
     ``matches``. The engine uses this list to track active journey paths
     and determine which node guidelines are eligible in subsequent
     preparation iterations."""
+
+    resolutions: dict[ResolvedEntityId, list[Resolution]] = field(default_factory=dict)
+    """Map of entity IDs to all resolution decisions made about them.
+    Includes removed guidelines/journeys (UNMET_*, DEPRIORITIZED),
+    added guidelines (ENTAILED), and unchanged entities (NONE).
+    Every entity that entered the resolver gets an entry."""
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +177,8 @@ class _DependencyTarget:
 
     kind: _DependencyTargetKind
     guideline_ids: set[GuidelineId] = field(default_factory=set)
+    relationship_id: RelationshipId | None = None
+    target_id: ResolvedEntityId | TagId | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +233,7 @@ class RelationalResolver:
             with self._logger.scope("RelationalResolver"):
                 with self._tracer.span("relational_resolver.resolve"):
                     cache: _RelationshipCache = {}
-                deactivation_reasons: dict[GuidelineId, str] = {}
+                resolutions: dict[ResolvedEntityId, list[Resolution]] = {}
 
                 # Build a tag → guidelines index from usable_guidelines so that
                 # all tag lookups are in-memory instead of hitting the store.
@@ -189,6 +243,7 @@ class RelationalResolver:
                         guidelines_by_tag[tid].append(g)
 
                 initial_match_ids = {m.guideline.id for m in matches}
+                initial_journey_ids = {j.id for j in journeys}
                 current_matches = list(matches)
                 current_journeys = list(journeys)
                 entailed_ids: set[GuidelineId] = set()
@@ -202,7 +257,7 @@ class RelationalResolver:
                         current_journeys,
                         cache,
                         guidelines_by_tag,
-                        deactivation_reasons,
+                        resolutions,
                     )
 
                     # Step 2: Relational prioritization (includes transitive dep filtering)
@@ -211,7 +266,7 @@ class RelationalResolver:
                         current_journeys,
                         cache,
                         guidelines_by_tag,
-                        deactivation_reasons,
+                        resolutions,
                     )
 
                     # Step 3: Numerical priority filtering.
@@ -226,23 +281,35 @@ class RelationalResolver:
                         m for m in prio_result.matches if m.guideline.id in entailed_ids
                     ]
                     filtered_non_entailed, new_journeys = self.find_highest_priority_entities(
-                        non_entailed, list(prio_result.journeys), deactivation_reasons
+                        non_entailed, list(prio_result.journeys), resolutions
                     )
                     new_matches = filtered_non_entailed + entailed_matches
 
                     # Step 4: Entailment.
                     # Exclude guidelines that were deactivated (by deps, priority, etc.)
                     # so that entailment doesn't re-add them in an infinite loop.
-                    deactivated_ids = set(deactivation_reasons.keys())
-                    entailed = [
-                        m
-                        for m in await self._apply_entailment(
-                            usable_guidelines, new_matches, cache, guidelines_by_tag
-                        )
-                        if m.guideline.id not in deactivated_ids
-                    ]
-                    for m in entailed:
-                        entailed_ids.add(m.guideline.id)
+                    deactivated_ids = {
+                        eid
+                        for eid, res_list in resolutions.items()
+                        if any(r.kind != ResolutionKind.NONE for r in res_list)
+                    }
+                    entailed_with_rels = await self._apply_entailment(
+                        usable_guidelines, new_matches, cache, guidelines_by_tag
+                    )
+                    entailed: list[GuidelineMatch] = []
+                    for m, rel_id in entailed_with_rels:
+                        if m.guideline.id not in deactivated_ids:
+                            entailed.append(m)
+                            entailed_ids.add(m.guideline.id)
+                            resolutions.setdefault(m.guideline.id, []).append(
+                                Resolution(
+                                    kind=ResolutionKind.ENTAILED,
+                                    details=ResolutionDetails(
+                                        description=("Activated via entailment"),
+                                        relationship_id=rel_id,
+                                    ),
+                                )
+                            )
                     new_matches = list(new_matches) + entailed
 
                     if self._matches_equal(new_matches, current_matches) and self._journeys_equal(
@@ -260,20 +327,36 @@ class RelationalResolver:
                         f"RelationalResolver reached max iterations ({self.MAX_ITERATIONS})"
                     )
 
-                self._emit_tracer_events(
-                    initial_match_ids, current_matches, matches, deactivation_reasons
-                )
+                # Add NONE resolutions for entities that passed through unchanged
+                all_entity_ids: set[ResolvedEntityId] = set()
+                all_entity_ids.update(initial_match_ids)
+                all_entity_ids.update(initial_journey_ids)
+                all_entity_ids.update(m.guideline.id for m in current_matches)
+                all_entity_ids.update(j.id for j in current_journeys)
+                for eid in all_entity_ids:
+                    if eid not in resolutions:
+                        resolutions[eid] = [
+                            Resolution(
+                                kind=ResolutionKind.NONE,
+                                details=ResolutionDetails(
+                                    description="No relational changes",
+                                ),
+                            )
+                        ]
+
+                self._emit_tracer_events(initial_match_ids, current_matches, matches, resolutions)
 
                 return RelationalResolverResult(
                     matches=current_matches,
                     journeys=current_journeys,
+                    resolutions=resolutions,
                 )
 
     def find_highest_priority_entities(
         self,
         matches: Sequence[GuidelineMatch],
         journeys: Sequence[Journey],
-        deactivation_reasons: dict[GuidelineId, str],
+        resolutions: dict[ResolvedEntityId, list[Resolution]],
     ) -> tuple[list[GuidelineMatch], list[Journey]]:
         """Keep only entities sharing the highest numerical priority value.
 
@@ -309,11 +392,33 @@ class RelationalResolver:
                     f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
                     f"filtered due to lower priority ({priority} < {max_priority})"
                 )
-                deactivation_reasons[match.guideline.id] = (
-                    f"Filtered due to lower priority ({priority} < {max_priority})"
+                resolutions.setdefault(match.guideline.id, []).append(
+                    Resolution(
+                        kind=ResolutionKind.DEPRIORITIZED,
+                        details=ResolutionDetails(
+                            description=(
+                                f"Filtered due to lower priority ({priority} < {max_priority})"
+                            ),
+                        ),
+                    )
                 )
 
-        filtered_journeys = [j for j in journeys if j.priority >= max_priority]
+        filtered_journeys = []
+        for j in journeys:
+            if j.priority >= max_priority:
+                filtered_journeys.append(j)
+            else:
+                resolutions.setdefault(j.id, []).append(
+                    Resolution(
+                        kind=ResolutionKind.DEPRIORITIZED,
+                        details=ResolutionDetails(
+                            description=(
+                                f"Filtered due to lower priority ({j.priority} < {max_priority})"
+                            ),
+                        ),
+                    )
+                )
+
         return filtered_matches, filtered_journeys
 
     # -- Dependency resolution ----------------------------------------------
@@ -324,7 +429,7 @@ class RelationalResolver:
         journeys: Sequence[Journey],
         cache: _RelationshipCache,
         guidelines_by_tag: dict[TagId, list[Guideline]],
-        deactivation_reasons: dict[GuidelineId, str],
+        resolutions: dict[ResolvedEntityId, list[Resolution]],
     ) -> Sequence[GuidelineMatch]:
         """Filter guidelines with unmet dependencies using topological ordering.
 
@@ -349,6 +454,11 @@ class RelationalResolver:
         for m in matches:
             for tid in m.guideline.tags:
                 tag_to_matched[tid].add(m.guideline.id)
+            # Also register journey node guidelines under their journey tag
+            # so that journey-tag dependency targets can participate in the
+            # topological sort and cascade correctly.
+            if jid := self._extract_journey_id_from_guideline(m.guideline):
+                tag_to_matched[Tag.for_journey_id(cast(JourneyId, jid)).id].add(m.guideline.id)
 
         # ── Phase 1: Resolve dependency targets ──────────────────────────
 
@@ -399,18 +509,57 @@ class RelationalResolver:
             if gid not in surviving:
                 continue
 
-            # Check AND dependencies
-            if not self._check_and_deps(and_deps.get(gid, []), surviving):
-                surviving.discard(gid)
-            # Check OR groups (only if AND deps passed)
-            elif gid in or_groups and not self._check_or_groups(or_groups[gid], surviving):
-                surviving.discard(gid)
+            failed = False
 
-            if gid not in surviving:
+            # Check AND dependencies — collect ALL failures
+            for dep in and_deps.get(gid, []):
+                if not self._is_dep_target_met(dep, surviving):
+                    failed = True
+                    target_ids: tuple[ResolvedEntityId | TagId, ...] = ()
+                    if dep.target_id is not None:
+                        target_ids = (dep.target_id,)
+                    resolutions.setdefault(gid, []).append(
+                        Resolution(
+                            kind=ResolutionKind.UNMET_DEPENDENCY_ALL,
+                            details=ResolutionDetails(
+                                description=(f"AND dependency target {dep.target_id} not met"),
+                                relationship_id=dep.relationship_id,
+                                target_ids=target_ids,
+                            ),
+                        )
+                    )
+
+            # Check OR groups — collect ALL failing groups
+            for group_id, targets in or_groups.get(gid, {}).items():
+                if not any(self._is_dep_target_met(dep, surviving) for dep in targets):
+                    failed = True
+                    group_target_ids: tuple[ResolvedEntityId | TagId, ...] = tuple(
+                        dep.target_id for dep in targets if dep.target_id is not None
+                    )
+                    # Use relationship_id from first target in group
+                    rel_id = next(
+                        (dep.relationship_id for dep in targets if dep.relationship_id),
+                        None,
+                    )
+                    resolutions.setdefault(gid, []).append(
+                        Resolution(
+                            kind=ResolutionKind.UNMET_DEPENDENCY_ANY,
+                            details=ResolutionDetails(
+                                description=(
+                                    f"OR dependency group '{group_id}' not met — "
+                                    f"none of {group_target_ids} active"
+                                ),
+                                relationship_id=rel_id,
+                                target_ids=group_target_ids,
+                            ),
+                        )
+                    )
+
+            if failed:
+                surviving.discard(gid)
                 self._logger.debug(
                     f"Skipped: Guideline {gid} deactivated due to unmet dependencies"
                 )
-                deactivation_reasons[gid] = "Unmet dependencies"
 
         return [m for m in matches if m.guideline.id in surviving]
 
@@ -437,19 +586,22 @@ class RelationalResolver:
         """Fetch all DEPENDENCY and DEPENDENCY_ANY relationships for a set of
         source IDs, deduplicating by relationship ID.
 
-        DEPENDENCY uses ``indirect=True`` (transitive journey tag chains need it).
-        DEPENDENCY_ANY uses ``indirect=False`` (OR groups are always direct).
+        Both kinds use ``indirect=False`` — only direct relationships are
+        fetched. Cascading (transitive) failures are handled by the
+        topological-sort evaluation loop in Phase 3: when a dependency
+        target is removed from the surviving set, its dependents fail
+        naturally on the next evaluation step.
         """
         result: list[Relationship] = []
         seen: set[RelationshipId] = set()
 
         for source_id in source_ids:
-            for dep_kind, indirect in [
-                (RelationshipKind.DEPENDENCY, True),
-                (RelationshipKind.DEPENDENCY_ANY, False),
+            for dep_kind in [
+                RelationshipKind.DEPENDENCY,
+                RelationshipKind.DEPENDENCY_ANY,
             ]:
                 for rel in await self._get_relationships(
-                    cache, dep_kind, indirect, source_id=source_id
+                    cache, dep_kind, False, source_id=source_id
                 ):
                     if rel.id not in seen:
                         result.append(rel)
@@ -474,25 +626,58 @@ class RelationalResolver:
         """
         # --- Target is a specific guideline ---
         if rel.target.kind == RelationshipEntityKind.GUIDELINE:
-            target_id = cast(GuidelineId, rel.target.id)
-            if target_id not in matched_ids:
-                return _DependencyTarget(kind=_DependencyTargetKind.UNMET)
-            if target_id != gid:
-                topo_edges[gid].add(target_id)
+            dep_target_id = cast(GuidelineId, rel.target.id)
+            if dep_target_id not in matched_ids:
+                return _DependencyTarget(
+                    kind=_DependencyTargetKind.UNMET,
+                    relationship_id=rel.id,
+                    target_id=dep_target_id,
+                )
+            if dep_target_id != gid:
+                topo_edges[gid].add(dep_target_id)
             return _DependencyTarget(
                 kind=_DependencyTargetKind.MATCHED_GUIDELINE,
-                guideline_ids={target_id},
+                guideline_ids={dep_target_id},
+                relationship_id=rel.id,
+                target_id=dep_target_id,
             )
 
         # --- Target is a tag (journey tag, TAG_ANY, or TAG_ALL) ---
         if rel.target.kind.is_tag:
             tag_id = cast(TagId, rel.target.id)
 
-            # Journey tag: check journey activity directly.
+            # Journey tag: check journey activity and link to its node
+            # guidelines so the topological sort can cascade correctly
+            # (e.g. when a node guideline is removed, dependents of the
+            # journey tag are re-evaluated).
             if journey_id := Tag.extract_journey_id(tag_id):
-                if any(j.id == journey_id for j in journeys):
-                    return _DependencyTarget(kind=_DependencyTargetKind.MET)
-                return _DependencyTarget(kind=_DependencyTargetKind.UNMET)
+                if not any(j.id == journey_id for j in journeys):
+                    return _DependencyTarget(
+                        kind=_DependencyTargetKind.UNMET,
+                        relationship_id=rel.id,
+                        target_id=tag_id,
+                    )
+                # Find matched node guidelines belonging to this journey.
+                journey_node_ids = tag_to_matched.get(tag_id, set()) & matched_ids
+                if not journey_node_ids:
+                    # Journey is active but has no matched node guidelines
+                    # in the current set — treat as MET (journey-level dep).
+                    return _DependencyTarget(
+                        kind=_DependencyTargetKind.MET,
+                        relationship_id=rel.id,
+                        target_id=tag_id,
+                    )
+                # Register topo edges so dependents are processed after
+                # the journey's node guidelines.
+                for mid in journey_node_ids:
+                    if mid != gid:
+                        topo_edges[gid].add(mid)
+                return _DependencyTarget(
+                    kind=_DependencyTargetKind.ANY_MATCHED_TAG_MEMBER,
+                    guideline_ids=journey_node_ids,
+                    relationship_id=rel.id,
+                    target_id=tag_id,
+                )
 
             # Custom tag: collect members and check match status.
             all_member_ids = {g.id for g in guidelines_by_tag.get(tag_id, [])}
@@ -506,18 +691,30 @@ class RelationalResolver:
 
             if rel.target.kind == RelationshipEntityKind.TAG_ANY:
                 if not matched_members:
-                    return _DependencyTarget(kind=_DependencyTargetKind.UNMET)
+                    return _DependencyTarget(
+                        kind=_DependencyTargetKind.UNMET,
+                        relationship_id=rel.id,
+                        target_id=tag_id,
+                    )
                 return _DependencyTarget(
                     kind=_DependencyTargetKind.ANY_MATCHED_TAG_MEMBER,
                     guideline_ids=matched_members,
+                    relationship_id=rel.id,
+                    target_id=tag_id,
                 )
             else:
                 # TAG_ALL: every member must be matched.
                 if not all_member_ids or (all_member_ids - matched_ids):
-                    return _DependencyTarget(kind=_DependencyTargetKind.UNMET)
+                    return _DependencyTarget(
+                        kind=_DependencyTargetKind.UNMET,
+                        relationship_id=rel.id,
+                        target_id=tag_id,
+                    )
                 return _DependencyTarget(
                     kind=_DependencyTargetKind.MATCHED_GUIDELINE,
                     guideline_ids=matched_members,
+                    relationship_id=rel.id,
+                    target_id=tag_id,
                 )
 
         # Unknown target kind — treat as unmet.
@@ -592,7 +789,7 @@ class RelationalResolver:
         journeys: Sequence[Journey],
         cache: _RelationshipCache,
         guidelines_by_tag: dict[TagId, list[Guideline]],
-        deactivation_reasons: dict[GuidelineId, str],
+        resolutions: dict[ResolvedEntityId, list[Resolution]],
     ) -> RelationalResolverResult:
         """Apply priority relationships and filter both matches and journeys.
 
@@ -703,12 +900,36 @@ class RelationalResolver:
                 if self._is_journey_node_guideline(match.guideline):
                     if jid := self._extract_journey_id_from_guideline(match.guideline):
                         deprioritized_journeys.add(cast(JourneyId, jid))
+
+                # Record resolution
+                if prioritized_guideline_id:
+                    resolutions.setdefault(match.guideline.id, []).append(
+                        Resolution(
+                            kind=ResolutionKind.DEPRIORITIZED,
+                            details=ResolutionDetails(
+                                description=(
+                                    f"Deprioritized by guideline {prioritized_guideline_id}"
+                                ),
+                                target_ids=(prioritized_guideline_id,),
+                            ),
+                        )
+                    )
+                elif prioritized_journey_id:
+                    resolutions.setdefault(match.guideline.id, []).append(
+                        Resolution(
+                            kind=ResolutionKind.DEPRIORITIZED,
+                            details=ResolutionDetails(
+                                description=(f"Deprioritized by journey {prioritized_journey_id}"),
+                                target_ids=(prioritized_journey_id,),
+                            ),
+                        )
+                    )
+
                 self._log_deprioritization(
                     match,
                     matches,
                     prioritized_guideline_id,
                     prioritized_journey_id,
-                    deactivation_reasons,
                     deprioritized_journeys,
                 )
 
@@ -734,7 +955,7 @@ class RelationalResolver:
             guidelines_by_tag,
             deprioritized_guidelines,
             deprioritized_journeys,
-            deactivation_reasons,
+            resolutions,
         )
 
         filtered_journeys = [j for j in journeys if j.id not in deprioritized_journeys]
@@ -745,7 +966,12 @@ class RelationalResolver:
         match: GuidelineMatch,
         cache: _RelationshipCache,
     ) -> list[Relationship]:
-        """Gather all PRIORITY relationships targeting this match."""
+        """Gather all PRIORITY relationships targeting this match.
+
+        Uses ``indirect=True`` because priority chains can go through tags
+        (e.g. G1 → T1 → G2), and tags are not tracked in the match set,
+        so the iteration loop cannot cascade through them.
+        """
         rels = await self._get_relationships(
             cache, RelationshipKind.PRIORITY, True, target_id=match.guideline.id
         )
@@ -797,7 +1023,7 @@ class RelationalResolver:
         guidelines_by_tag: dict[TagId, list[Guideline]],
         deprioritized_guidelines: set[GuidelineId],
         deprioritized_journeys: set[JourneyId],
-        deactivation_reasons: dict[GuidelineId, str],
+        resolutions: dict[ResolvedEntityId, list[Resolution]],
     ) -> list[GuidelineMatch]:
         """Remove guidelines that depend on deprioritized entities.
 
@@ -813,10 +1039,12 @@ class RelationalResolver:
 
             for dep_kind in (RelationshipKind.DEPENDENCY, RelationshipKind.DEPENDENCY_ANY):
                 rels = await self._get_relationships(
-                    cache, dep_kind, True, source_id=match.guideline.id
+                    cache, dep_kind, False, source_id=match.guideline.id
                 )
                 for tid in match.guideline.tags:
-                    rels.extend(await self._get_relationships(cache, dep_kind, True, source_id=tid))
+                    rels.extend(
+                        await self._get_relationships(cache, dep_kind, False, source_id=tid)
+                    )
                 for rel in rels:
                     if rel.kind == RelationshipKind.DEPENDENCY_ANY and rel.group_id:
                         or_groups.setdefault(rel.group_id, []).append(rel)
@@ -860,9 +1088,38 @@ class RelationalResolver:
                     f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
                     f"deactivated due to dependency on deprioritized entity"
                 )
-                deactivation_reasons[match.guideline.id] = (
-                    f"[Unmatched due to unmet dependencies] {match.rationale}"
-                )
+                # Find the specific deprioritized dependency for the resolution
+                deprioritized_dep_ids: list[ResolvedEntityId | TagId] = []
+                for dep in and_deps:
+                    if self._is_dep_target_deprioritized(
+                        dep, deprioritized_guidelines, deprioritized_journeys, tagged_cache
+                    ):
+                        deprioritized_dep_ids.append(cast(ResolvedEntityId | TagId, dep.target.id))
+                for group_rels in or_groups.values():
+                    if all(
+                        self._is_dep_target_deprioritized(
+                            dep,
+                            deprioritized_guidelines,
+                            deprioritized_journeys,
+                            tagged_cache,
+                        )
+                        for dep in group_rels
+                    ):
+                        for dep in group_rels:
+                            deprioritized_dep_ids.append(
+                                cast(ResolvedEntityId | TagId, dep.target.id)
+                            )
+
+                for dep_id in deprioritized_dep_ids:
+                    resolutions.setdefault(match.guideline.id, []).append(
+                        Resolution(
+                            kind=ResolutionKind.DEPRIORITIZED,
+                            details=ResolutionDetails(
+                                description=(f"Dependency {dep_id} was deprioritized"),
+                                target_ids=(dep_id,),
+                            ),
+                        )
+                    )
             else:
                 result.append(match)
 
@@ -874,10 +1131,9 @@ class RelationalResolver:
         all_matches: Sequence[GuidelineMatch],
         prioritized_guideline_id: GuidelineId | None,
         prioritized_journey_id: JourneyId | None,
-        deactivation_reasons: dict[GuidelineId, str],
         deprioritized_journeys: set[JourneyId],
     ) -> None:
-        """Log and record the reason a match was deprioritized."""
+        """Log the reason a match was deprioritized."""
         if prioritized_guideline_id:
             prioritized = next(
                 m.guideline for m in all_matches if m.guideline.id == prioritized_guideline_id
@@ -887,20 +1143,12 @@ class RelationalResolver:
                 f"deactivated due to contextual prioritization by "
                 f"{prioritized_guideline_id} ({prioritized.content.action})"
             )
-            deactivation_reasons[match.guideline.id] = (
-                f"[Unmatched due to deprioritized by guideline {prioritized_guideline_id}] "
-                f"{match.rationale}"
-            )
         elif prioritized_journey_id:
             deprioritized_journeys.add(prioritized_journey_id)
             self._logger.debug(
                 f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
                 f"deactivated due to contextual prioritization by journey "
                 f"{prioritized_journey_id}"
-            )
-            deactivation_reasons[match.guideline.id] = (
-                f"[Unmatched due to deprioritized by journey {prioritized_journey_id}] "
-                f"{match.rationale}"
             )
 
     # -- Entailment ---------------------------------------------------------
@@ -911,9 +1159,16 @@ class RelationalResolver:
         matches: Sequence[GuidelineMatch],
         cache: _RelationshipCache,
         guidelines_by_tag: dict[TagId, list[Guideline]],
-    ) -> Sequence[GuidelineMatch]:
-        """Activate additional guidelines implied by entailment relationships."""
-        related_by_match = defaultdict[GuidelineMatch, set[Guideline]](set)
+    ) -> list[tuple[GuidelineMatch, RelationshipId | None]]:
+        """Activate additional guidelines implied by entailment relationships.
+
+        Returns a list of (entailed_match, relationship_id) tuples so the caller
+        can create ENTAILED resolutions.
+        """
+        # Map: guideline -> (entailing match, relationship_id)
+        related_by_match: dict[
+            GuidelineId, list[tuple[GuidelineMatch, Guideline, RelationshipId | None]]
+        ] = defaultdict(list)
         match_ids = {m.guideline.id for m in matches}
 
         for match in matches:
@@ -927,14 +1182,14 @@ class RelationalResolver:
                 if rel.target.kind == RelationshipEntityKind.GUIDELINE:
                     if any(rel.target.id == m.guideline.id for m in matches):
                         continue
-                    related_by_match[match].add(
-                        next(g for g in usable_guidelines if g.id == rel.target.id)
-                    )
+                    target_guideline = next(g for g in usable_guidelines if g.id == rel.target.id)
+                    related_by_match[target_guideline.id].append((match, target_guideline, rel.id))
 
                 elif rel.target.kind.is_tag:
                     tagged = guidelines_by_tag.get(cast(TagId, rel.target.id), [])
-                    related_by_match[match].update(g for g in tagged if g.id not in match_ids)
                     for g in tagged:
+                        if g.id not in match_ids:
+                            related_by_match[g.id].append((match, g, rel.id))
                         relationships.extend(
                             await self._get_relationships(
                                 cache, RelationshipKind.ENTAILMENT, True, source_id=g.id
@@ -943,24 +1198,27 @@ class RelationalResolver:
 
         # Deduplicate: each inferred guideline is associated with the
         # highest-scoring match that entails it.
-        pairs: list[tuple[GuidelineMatch, Guideline]] = []
-        for match, related in related_by_match.items():
-            for guideline in related:
-                existing = [(m, g) for m, g in pairs if g == guideline]
-                if existing:
-                    assert len(existing) == 1
-                    if existing[0][0].score >= match.score:
-                        continue
-                    pairs.remove(existing[0])
-                pairs.append((match, guideline))
+        pairs: list[tuple[GuidelineMatch, Guideline, RelationshipId | None]] = []
+        seen_guidelines: set[GuidelineId] = set()
+        for gid, entries in related_by_match.items():
+            best: tuple[GuidelineMatch, Guideline, RelationshipId | None] | None = None
+            for entry in entries:
+                if best is None or entry[0].score > best[0].score:
+                    best = entry
+            if best is not None and gid not in seen_guidelines:
+                pairs.append(best)
+                seen_guidelines.add(gid)
 
         return [
-            GuidelineMatch(
-                guideline=guideline,
-                score=match.score,
-                rationale="[Activated via entailment] Automatically inferred from context",
+            (
+                GuidelineMatch(
+                    guideline=guideline,
+                    score=match.score,
+                    rationale="[Activated via entailment] Automatically inferred from context",
+                ),
+                rel_id,
             )
-            for match, guideline in pairs
+            for match, guideline, rel_id in pairs
         ]
 
     # -- Shared helpers -----------------------------------------------------
@@ -1041,7 +1299,7 @@ class RelationalResolver:
         initial_ids: set[GuidelineId],
         final_matches: list[GuidelineMatch],
         original_matches: Sequence[GuidelineMatch],
-        deactivation_reasons: dict[GuidelineId, str],
+        resolutions: dict[ResolvedEntityId, list[Resolution]],
     ) -> None:
         """Emit tracer events for activated (entailed) and deactivated guidelines."""
         final_ids = {m.guideline.id for m in final_matches}
@@ -1061,12 +1319,16 @@ class RelationalResolver:
 
         for gid in initial_ids - final_ids:
             m = all_matches[gid]
+            res_list = resolutions.get(gid, [])
+            rationale = (
+                "; ".join(r.details.description for r in res_list) if res_list else "Unknown reason"
+            )
             self._tracer.add_event(
                 "gm.deactivate",
                 attributes={
                     "guideline_id": gid,
                     "condition": m.guideline.content.condition,
                     "action": m.guideline.content.action or "",
-                    "rationale": deactivation_reasons.get(gid, "Unknown reason"),
+                    "rationale": rationale,
                 },
             )

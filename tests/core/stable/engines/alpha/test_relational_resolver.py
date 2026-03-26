@@ -15,7 +15,13 @@
 from lagom import Container
 
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
-from parlant.core.engines.alpha.relational_resolver import RelationalResolver
+from parlant.core.engines.alpha.relational_resolver import (
+    RelationalResolver,
+    RelationalResolverResult,
+    Resolution,
+    ResolutionKind,
+    ResolvedEntityId,
+)
 from parlant.core.journey_guideline_projection import JourneyGuidelineProjection
 from parlant.core.journeys import JourneyStore
 from parlant.core.relationships import (
@@ -26,6 +32,31 @@ from parlant.core.relationships import (
 )
 from parlant.core.guidelines import GuidelineStore
 from parlant.core.tags import TagStore, Tag
+
+
+def assert_resolutions(
+    result: RelationalResolverResult,
+    entity_id: ResolvedEntityId,
+    expected_kinds: list[ResolutionKind],
+) -> None:
+    """Assert that an entity has exactly the given resolution kinds."""
+    resolutions = result.resolutions.get(entity_id, [])
+    actual_kinds = [r.kind for r in resolutions]
+    assert sorted(actual_kinds, key=lambda k: k.name) == sorted(
+        expected_kinds, key=lambda k: k.name
+    ), (
+        f"Entity {entity_id}: expected resolution kinds {[k.name for k in expected_kinds]}, "
+        f"got {[k.name for k in actual_kinds]}"
+    )
+
+
+def get_resolutions_by_kind(
+    result: RelationalResolverResult,
+    entity_id: ResolvedEntityId,
+    kind: ResolutionKind,
+) -> list[Resolution]:
+    """Get all resolutions of a specific kind for an entity."""
+    return [r for r in result.resolutions.get(entity_id, []) if r.kind == kind]
 
 
 async def test_that_relational_resolver_prioritizes_indirectly_between_guidelines(
@@ -74,6 +105,10 @@ async def test_that_relational_resolver_prioritizes_indirectly_between_guideline
     )
 
     assert result.matches == [GuidelineMatch(guideline=g1, score=8, rationale="")]
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_prioritizes_between_journey_nodes(
@@ -132,6 +167,9 @@ async def test_that_relational_resolver_prioritizes_between_journey_nodes(
     )
 
     assert result.matches == [GuidelineMatch(guideline=j1_guidelines[0], score=8, rationale="")]
+
+    assert_resolutions(result, j1_guidelines[0].id, [ResolutionKind.NONE])
+    assert_resolutions(result, j2_guidelines[0].id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_prioritizes_guideline_over_journey(
@@ -211,6 +249,10 @@ async def test_that_relational_resolver_prioritizes_guideline_over_journey(
 
     # Only the standalone guideline should remain (all journey-guidelines are filtered out)
     assert result.matches == [GuidelineMatch(guideline=standalone_guideline, score=8, rationale="")]
+
+    assert_resolutions(result, standalone_guideline.id, [ResolutionKind.NONE])
+    for jg in journey_guidelines:
+        assert_resolutions(result, jg.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_prioritizes_journey_over_guideline(
@@ -292,6 +334,10 @@ async def test_that_relational_resolver_prioritizes_journey_over_guideline(
     # Only the journey-guidelines remain
     assert result.matches == journey_matches
 
+    for jg in journey_guidelines:
+        assert_resolutions(result, jg.id, [ResolutionKind.NONE])
+    assert_resolutions(result, standalone_guideline.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_filters_journey_dependent_guideline_when_journey_is_deprioritized(
     container: Container,
@@ -372,6 +418,9 @@ async def test_that_relational_resolver_filters_journey_dependent_guideline_when
     # - X depends on J, so when J is deprioritized, X is also filtered out
     assert result.matches == [GuidelineMatch(guideline=guideline_y, score=8, rationale="")]
 
+    assert_resolutions(result, guideline_y.id, [ResolutionKind.NONE])
+    assert_resolutions(result, guideline_x.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_does_not_ignore_a_deprioritized_guideline_when_its_prioritized_counterpart_is_not_active(
     container: Container,
@@ -404,6 +453,8 @@ async def test_that_relational_resolver_does_not_ignore_a_deprioritized_guidelin
     assert result.matches == [
         GuidelineMatch(guideline=deprioritized_guideline, score=5, rationale="")
     ]
+
+    assert_resolutions(result, deprioritized_guideline.id, [ResolutionKind.NONE])
 
 
 async def test_that_relational_resolver_does_not_ignore_deprioritized_journey_node_when_prioritized_journey_is_not_active(
@@ -468,6 +519,8 @@ async def test_that_relational_resolver_does_not_ignore_deprioritized_journey_no
         GuidelineMatch(guideline=deprioritized_guideline, score=5, rationale="")
     ]
 
+    assert_resolutions(result, deprioritized_guideline.id, [ResolutionKind.NONE])
+
 
 async def test_that_relational_resolver_prioritizes_guidelines(
     container: Container,
@@ -501,6 +554,9 @@ async def test_that_relational_resolver_prioritizes_guidelines(
     assert result.matches == [
         GuidelineMatch(guideline=prioritized_guideline, score=8, rationale="")
     ]
+
+    assert_resolutions(result, prioritized_guideline.id, [ResolutionKind.NONE])
+    assert_resolutions(result, deprioritized_guideline.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_infers_guidelines_from_tags(
@@ -563,6 +619,11 @@ async def test_that_relational_resolver_infers_guidelines_from_tags(
     assert any(m.guideline.id == g3.id for m in result.matches)
     assert any(m.guideline.id == g4.id for m in result.matches)
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.ENTAILED])
+    assert_resolutions(result, g3.id, [ResolutionKind.ENTAILED])
+    assert_resolutions(result, g4.id, [ResolutionKind.ENTAILED])
+
 
 async def test_that_relational_resolver_does_not_ignore_a_deprioritized_tag_when_its_prioritized_counterpart_is_not_active(
     container: Container,
@@ -613,6 +674,8 @@ async def test_that_relational_resolver_does_not_ignore_a_deprioritized_tag_when
 
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == deprioritized_guideline.id
+
+    assert_resolutions(result, deprioritized_guideline.id, [ResolutionKind.NONE])
 
 
 async def test_that_relational_resolver_prioritizes_guidelines_from_tags(
@@ -665,6 +728,9 @@ async def test_that_relational_resolver_prioritizes_guidelines_from_tags(
 
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == g1.id
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_handles_indirect_guidelines_from_tags(
@@ -719,6 +785,9 @@ async def test_that_relational_resolver_handles_indirect_guidelines_from_tags(
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == g1.id
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_filters_out_guidelines_with_unmet_dependencies(
     container: Container,
@@ -756,6 +825,8 @@ async def test_that_relational_resolver_filters_out_guidelines_with_unmet_depend
     )
 
     assert result.matches == []
+
+    assert_resolutions(result, source_guideline.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 async def test_that_relational_resolver_keeps_guideline_depending_on_tag_when_at_least_one_tagged_member_is_matched(
@@ -814,6 +885,9 @@ async def test_that_relational_resolver_keeps_guideline_depending_on_tag_when_at
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {source_guideline.id, tagged_guideline_1.id}
 
+    assert_resolutions(result, source_guideline.id, [ResolutionKind.NONE])
+    assert_resolutions(result, tagged_guideline_1.id, [ResolutionKind.NONE])
+
 
 async def test_that_relational_resolver_filters_out_journey_nodes_with_unmet_journey_dependency_with_guideline(
     container: Container,
@@ -865,6 +939,10 @@ async def test_that_relational_resolver_filters_out_journey_nodes_with_unmet_jou
     )
 
     assert result.matches == []
+
+    assert_resolutions(
+        result, source_journey_guidelines[0].id, [ResolutionKind.UNMET_DEPENDENCY_ALL]
+    )
 
 
 async def test_that_relational_resolver_filters_out_journey_nodes_with_unmet_journey_dependencies(
@@ -920,6 +998,10 @@ async def test_that_relational_resolver_filters_out_journey_nodes_with_unmet_jou
     )
 
     assert result.matches == []
+
+    assert_resolutions(
+        result, source_journey_guidelines[0].id, [ResolutionKind.UNMET_DEPENDENCY_ALL]
+    )
 
 
 async def test_that_relational_resolver_filters_dependent_guidelines_by_journey_tags_when_journeys_are_not_relatively_enabled(
@@ -983,6 +1065,11 @@ async def test_that_relational_resolver_filters_dependent_guidelines_by_journey_
 
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == enabled_journey_tagged_guideline.id
+
+    assert_resolutions(result, enabled_journey_tagged_guideline.id, [ResolutionKind.NONE])
+    assert_resolutions(
+        result, disabled_journey_tagged_guideline.id, [ResolutionKind.UNMET_DEPENDENCY_ALL]
+    )
 
 
 async def test_that_relational_resolver_iterates_until_stable_with_cascading_priorities(
@@ -1079,6 +1166,11 @@ async def test_that_relational_resolver_iterates_until_stable_with_cascading_pri
     assert any(m.guideline.id == guideline_a.id for m in result.matches)
     assert any(m.guideline.id == guideline_d.id for m in result.matches)
 
+    assert_resolutions(result, guideline_a.id, [ResolutionKind.NONE])
+    assert_resolutions(result, guideline_b.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, guideline_c.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, guideline_d.id, [ResolutionKind.NONE])
+
 
 async def test_that_relational_resolver_handles_priority_affecting_dependency_in_second_iteration(
     container: Container,
@@ -1172,6 +1264,11 @@ async def test_that_relational_resolver_handles_priority_affecting_dependency_in
     assert any(m.guideline.id == guideline_a.id for m in result.matches)
     assert any(m.guideline.id == guideline_z.id for m in result.matches)
 
+    assert_resolutions(result, guideline_a.id, [ResolutionKind.NONE])
+    assert_resolutions(result, guideline_z.id, [ResolutionKind.ENTAILED])
+    assert_resolutions(result, guideline_y.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, guideline_x.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_filters_guidelines_by_priority_keeping_only_highest(
     container: Container,
@@ -1210,6 +1307,9 @@ async def test_that_relational_resolver_filters_guidelines_by_priority_keeping_o
 
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == guideline_a.id
+
+    assert_resolutions(result, guideline_a.id, [ResolutionKind.NONE])
+    assert_resolutions(result, guideline_b.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_filters_journeys_by_priority_keeping_only_highest(
@@ -1270,6 +1370,9 @@ async def test_that_relational_resolver_filters_journeys_by_priority_keeping_onl
     assert len(result.journeys) == 1
     assert result.journeys[0].id == j1.id
 
+    assert_resolutions(result, j1_guidelines[0].id, [ResolutionKind.NONE])
+    assert_resolutions(result, j2_guidelines[0].id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_filters_mixed_entities_by_priority_with_prioritized_guideline_to_keep_only_the_guideline(
     container: Container,
@@ -1322,6 +1425,10 @@ async def test_that_relational_resolver_filters_mixed_entities_by_priority_with_
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == standalone_guideline.id
     assert len(result.journeys) == 0
+
+    assert_resolutions(result, standalone_guideline.id, [ResolutionKind.NONE])
+    for jg in journey_guidelines:
+        assert_resolutions(result, jg.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_relational_resolver_filters_mixed_entities_by_priority_with_prioritized_journey_to_keep_only_the_journey(
@@ -1377,6 +1484,10 @@ async def test_that_relational_resolver_filters_mixed_entities_by_priority_with_
     assert len(result.journeys) == 1
     assert result.journeys[0].id == journey.id
 
+    assert_resolutions(result, standalone_guideline.id, [ResolutionKind.DEPRIORITIZED])
+    for jg in journey_guidelines:
+        assert_resolutions(result, jg.id, [ResolutionKind.NONE])
+
 
 async def test_that_relational_resolver_deprioritizes_target_guideline_when_source_is_custom_tag(
     container: Container,
@@ -1421,6 +1532,9 @@ async def test_that_relational_resolver_deprioritizes_target_guideline_when_sour
     assert len(result.matches) == 1
     assert result.matches[0].guideline.id == g1.id
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_filters_tagged_guideline_when_custom_tag_dependency_is_unmet(
     container: Container,
@@ -1462,6 +1576,8 @@ async def test_that_relational_resolver_filters_tagged_guideline_when_custom_tag
     )
 
     assert result.matches == []
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 async def test_that_relational_resolver_transitively_filters_guideline_depending_on_custom_tag_with_deprioritized_member(
@@ -1517,6 +1633,10 @@ async def test_that_relational_resolver_transitively_filters_guideline_depending
     # - g2 is deprioritized by g1
     # - g3 depends on tag t1, whose member g2 was deprioritized, so g3 is filtered
     assert result.matches == [GuidelineMatch(guideline=g1, score=9, rationale="")]
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_tag_priority_excludes_all_target_members_regardless_of_individual_priority(
@@ -1583,6 +1703,11 @@ async def test_that_tag_priority_excludes_all_target_members_regardless_of_indiv
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1_2.id}
 
+    assert_resolutions(result, g1_1.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g1_2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2_1.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g2_2.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_tag_priority_deprioritizes_all_guidelines_of_target_tag(
     container: Container,
@@ -1636,6 +1761,11 @@ async def test_that_tag_priority_deprioritizes_all_guidelines_of_target_tag(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1_1.id, g1_2.id}
+
+    assert_resolutions(result, g1_1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g1_2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2_1.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g2_2.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_journey_tag_priority_deprioritizes_all_guidelines_of_target_tag(
@@ -1697,6 +1827,10 @@ async def test_that_journey_tag_priority_deprioritizes_all_guidelines_of_target_
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {j_cond.id}
 
+    assert_resolutions(result, j_cond.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g1.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_journey_tag_priority_deprioritizes_target_journey_tag(
     container: Container,
@@ -1749,6 +1883,9 @@ async def test_that_journey_tag_priority_deprioritizes_target_journey_tag(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {j1_g.id}
+
+    assert_resolutions(result, j1_g.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j2_g.id, [ResolutionKind.DEPRIORITIZED])
 
 
 async def test_that_tag_priority_deprioritizes_target_journey(
@@ -1810,6 +1947,10 @@ async def test_that_tag_priority_deprioritizes_target_journey(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j_g.id, [ResolutionKind.DEPRIORITIZED])
+
 
 # ── Tag-level dependency tests ──────────────────────────────────────────────
 
@@ -1853,6 +1994,9 @@ async def test_that_tag_dependency_deactivates_tagged_guidelines_when_target_gui
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_dependency_deactivates_tagged_guidelines_when_target_tag_not_met(
     container: Container,
@@ -1893,6 +2037,9 @@ async def test_that_tag_dependency_deactivates_tagged_guidelines_when_target_tag
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
 
 
 async def test_that_journey_tag_dependency_deactivates_node_guidelines_when_target_tag_not_met(
@@ -1944,6 +2091,9 @@ async def test_that_journey_tag_dependency_deactivates_node_guidelines_when_targ
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
 
+    assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_dependency_deactivates_tagged_guidelines_when_target_journey_not_active(
     container: Container,
@@ -1986,6 +2136,9 @@ async def test_that_tag_dependency_deactivates_tagged_guidelines_when_target_jou
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
 
 
 async def test_that_journey_tag_dependency_deactivates_node_guidelines_when_target_journey_tag_not_active(
@@ -2035,6 +2188,9 @@ async def test_that_journey_tag_dependency_deactivates_node_guidelines_when_targ
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
 
+    assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
+
 
 # ── ANY-semantics tag dependency tests ─────────────────────────────────────
 
@@ -2080,6 +2236,9 @@ async def test_that_guideline_depending_on_tag_is_filtered_when_no_tagged_guidel
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
+
 
 async def test_that_guideline_depending_on_tag_survives_when_at_least_one_tagged_guideline_is_matched(
     container: Container,
@@ -2119,6 +2278,9 @@ async def test_that_guideline_depending_on_tag_survives_when_at_least_one_tagged
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
 
 
 async def test_that_guideline_depending_on_tag_survives_when_at_least_one_tagged_journey_is_active(
@@ -2174,6 +2336,9 @@ async def test_that_guideline_depending_on_tag_survives_when_at_least_one_tagged
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, j1_g.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j1_g.id, [ResolutionKind.NONE])
 
 
 async def test_that_guideline_depending_on_tag_is_filtered_when_no_tagged_journey_is_active(
@@ -2232,6 +2397,9 @@ async def test_that_guideline_depending_on_tag_is_filtered_when_no_tagged_journe
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_to_tag_dependency_survives_when_at_least_one_target_tag_member_is_matched(
     container: Container,
@@ -2272,6 +2440,9 @@ async def test_that_tag_to_tag_dependency_survives_when_at_least_one_target_tag_
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
 
 
 async def test_that_journey_tag_dependency_survives_when_at_least_one_target_tag_member_is_matched(
@@ -2322,6 +2493,9 @@ async def test_that_journey_tag_dependency_survives_when_at_least_one_target_tag
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {j1_g.id, g1.id}
 
+    assert_resolutions(result, j1_g.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_dependency_survives_when_tagged_journey_is_active_but_tagged_guideline_is_not_matched(
     container: Container,
@@ -2369,6 +2543,9 @@ async def test_that_tag_dependency_survives_when_tagged_journey_is_active_but_ta
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, j1_g.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j1_g.id, [ResolutionKind.NONE])
 
 
 # ── Dependency hierarchy tests ─────────────────────────────────────────────
@@ -2421,6 +2598,13 @@ async def test_that_hierarchical_guideline_dependency_cascades_when_root_is_not_
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
 
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(
+        result,
+        g3.id,
+        [ResolutionKind.UNMET_DEPENDENCY_ALL],
+    )
+
 
 async def test_that_hierarchical_guideline_dependency_cascades_when_middle_is_not_matched(
     container: Container,
@@ -2464,6 +2648,9 @@ async def test_that_hierarchical_guideline_dependency_cascades_when_middle_is_no
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 # Case 2: G1 -> J1 -> G2 (guideline → journey → guideline)
@@ -2523,6 +2710,9 @@ async def test_that_hierarchical_journey_dependency_cascades_when_root_guideline
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
+
+    assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 async def test_that_hierarchical_journey_dependency_cascades_when_journey_is_not_active(
@@ -2632,6 +2822,13 @@ async def test_that_hierarchical_tag_dependency_cascades_when_root_tag_member_is
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
 
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(
+        result,
+        g3.id,
+        [ResolutionKind.UNMET_DEPENDENCY_ALL],
+    )
+
 
 async def test_that_hierarchical_tag_dependency_cascades_when_middle_tag_member_is_not_matched(
     container: Container,
@@ -2680,6 +2877,9 @@ async def test_that_hierarchical_tag_dependency_cascades_when_middle_tag_member_
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 # Case 4: T1 -> J1 -> T2 (tag → journey → tag)
@@ -2744,6 +2944,9 @@ async def test_that_hierarchical_tag_journey_tag_dependency_cascades_when_root_t
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
 
+    assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+
 
 async def test_that_hierarchical_tag_journey_tag_dependency_cascades_when_journey_is_not_active(
     container: Container,
@@ -2804,6 +3007,10 @@ async def test_that_hierarchical_tag_journey_tag_dependency_cascades_when_journe
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+
 
 # Case 5: G1 -> T1 -> J1 (guideline → tag → journey)
 
@@ -2863,6 +3070,14 @@ async def test_that_hierarchical_guideline_tag_journey_dependency_cascades_when_
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
 
+    # Resolution assertions
+    assert_resolutions(result, g_t1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(
+        result,
+        j1_g.id,
+        [ResolutionKind.UNMET_DEPENDENCY_ALL],
+    )
+
 
 async def test_that_hierarchical_guideline_tag_journey_dependency_cascades_when_tag_member_is_not_matched(
     container: Container,
@@ -2918,6 +3133,10 @@ async def test_that_hierarchical_guideline_tag_journey_dependency_cascades_when_
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 # ── Edge-case tests ─────────────────────────────────────────────────────────
@@ -2983,6 +3202,13 @@ async def test_that_condition_guideline_survives_when_its_journey_is_deprioritiz
     # j1_node deprioritized (journey node), j1_cond survives (condition guideline)
     assert result_ids == {g1.id, j1_cond.id}
 
+    # Resolution assertions
+    assert_resolutions(result, j1_cond.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j1_node.id, [ResolutionKind.DEPRIORITIZED])
+    deprioritized = get_resolutions_by_kind(result, j1_node.id, ResolutionKind.DEPRIORITIZED)
+    assert any(g1.id in r.details.target_ids for r in deprioritized)
+
 
 async def test_that_tag_priority_does_not_deprioritize_when_no_source_tag_member_is_matched(
     container: Container,
@@ -3025,6 +3251,9 @@ async def test_that_tag_priority_does_not_deprioritize_when_no_source_tag_member
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g2_1.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g2_1.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_dependency_allows_tagged_guidelines_when_dependency_is_met(
     container: Container,
@@ -3066,6 +3295,10 @@ async def test_that_tag_dependency_allows_tagged_guidelines_when_dependency_is_m
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
 
 
 async def test_that_tag_priority_transitively_filters_guideline_depending_on_deprioritized_tag(
@@ -3120,6 +3353,13 @@ async def test_that_tag_priority_transitively_filters_guideline_depending_on_dep
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1_1.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g1_1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2_1.id, [ResolutionKind.DEPRIORITIZED])
+    deprioritized = get_resolutions_by_kind(result, g2_1.id, ResolutionKind.DEPRIORITIZED)
+    assert any(g1_1.id in r.details.target_ids for r in deprioritized)
+    assert_resolutions(result, g3.id, [ResolutionKind.DEPRIORITIZED])
+
 
 # ── Custom journey tag propagation tests ───────────────────────────────────
 
@@ -3173,6 +3413,12 @@ async def test_that_custom_tagged_journey_deprioritizes_guidelines_with_lower_pr
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {j1_node.id}
 
+    # Resolution assertions
+    assert_resolutions(result, j1_node.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g1.id, [ResolutionKind.DEPRIORITIZED])
+    deprioritized = get_resolutions_by_kind(result, g1.id, ResolutionKind.DEPRIORITIZED)
+    assert any(j1_node.id in r.details.target_ids for r in deprioritized)
+
 
 async def test_that_higher_priority_tag_deprioritizes_journey_with_matching_custom_tag(
     container: Container,
@@ -3222,6 +3468,12 @@ async def test_that_higher_priority_tag_deprioritizes_journey_with_matching_cust
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j1_node.id, [ResolutionKind.DEPRIORITIZED])
+    deprioritized = get_resolutions_by_kind(result, j1_node.id, ResolutionKind.DEPRIORITIZED)
+    assert any(g1.id in r.details.target_ids for r in deprioritized)
 
 
 async def test_that_custom_tagged_journey_dependency_deactivates_node_guidelines_when_target_tag_not_met(
@@ -3275,6 +3527,10 @@ async def test_that_custom_tagged_journey_dependency_deactivates_node_guidelines
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
 
+    # Resolution assertions
+    assert_resolutions(result, j1_node.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_dependency_on_custom_tagged_journey_deactivates_when_journey_not_active(
     container: Container,
@@ -3327,6 +3583,10 @@ async def test_that_tag_dependency_on_custom_tagged_journey_deactivates_when_jou
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
 
 
 async def test_that_relational_resolver_deprioritizes_journey_scoped_guideline_when_journey_is_deprioritized(
@@ -3420,6 +3680,10 @@ async def test_that_relational_resolver_deprioritizes_journey_scoped_guideline_w
     # Only g1 (from the prioritized journey) should survive
     assert result.matches == [GuidelineMatch(guideline=g1, score=8, rationale="")]
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+
 
 async def test_that_relational_resolver_deprioritizes_journey_scoped_guideline_when_guideline_prioritizes_over_journey(
     container: Container,
@@ -3489,6 +3753,10 @@ async def test_that_relational_resolver_deprioritizes_journey_scoped_guideline_w
     # Only the standalone guideline should survive
     assert result.matches == [GuidelineMatch(guideline=g_standalone, score=8, rationale="")]
 
+    # Resolution assertions
+    assert_resolutions(result, g_standalone.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g_scoped.id, [ResolutionKind.DEPRIORITIZED])
+
 
 # ── Dependency edge-case tests ─────────────────────────────────────────────
 
@@ -3552,6 +3820,19 @@ async def test_that_diamond_dependency_filters_all_dependents_when_root_is_not_m
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
 
+    # Resolution assertions
+    # G1 has two direct deps (G2 and G3) — both unmet
+    assert_resolutions(
+        result,
+        g1.id,
+        [
+            ResolutionKind.UNMET_DEPENDENCY_ALL,
+            ResolutionKind.UNMET_DEPENDENCY_ALL,
+        ],
+    )
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+
 
 async def test_that_diamond_dependency_keeps_all_when_root_is_matched(
     container: Container,
@@ -3608,6 +3889,12 @@ async def test_that_diamond_dependency_keeps_all_when_root_is_matched(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id, g4.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
+
 
 async def test_that_any_semantics_survives_cascading_failure_within_tag_member(
     container: Container,
@@ -3657,6 +3944,11 @@ async def test_that_any_semantics_survives_cascading_failure_within_tag_member(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g3.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
 
 
 async def test_that_any_semantics_filters_when_all_tag_members_cascade_fail(
@@ -3717,6 +4009,11 @@ async def test_that_any_semantics_filters_when_all_tag_members_cascade_fail(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+
 
 async def test_that_empty_tag_dependency_filters_dependent_guideline(
     container: Container,
@@ -3754,6 +4051,10 @@ async def test_that_empty_tag_dependency_filters_dependent_guideline(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g_extra.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g_extra.id, [ResolutionKind.NONE])
 
 
 async def test_that_multiple_independent_dependencies_must_all_be_met(
@@ -3802,6 +4103,10 @@ async def test_that_multiple_independent_dependencies_must_all_be_met(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g2.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+
 
 async def test_that_multiple_independent_dependencies_survive_when_all_met(
     container: Container,
@@ -3848,6 +4153,11 @@ async def test_that_multiple_independent_dependencies_survive_when_all_met(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
 
 
 async def test_that_multi_iteration_convergence_filters_dependent_when_transitive_dependency_fails(
@@ -3907,6 +4217,16 @@ async def test_that_multi_iteration_convergence_filters_dependent_when_transitiv
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g2.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    # G4 depends on G2 (met) and G3 (filtered), plus transitive dep on G1
+    assert_resolutions(
+        result,
+        g4.id,
+        [ResolutionKind.UNMET_DEPENDENCY_ALL],
+    )
+
 
 # ── Numerical priority + dependency interaction tests ──────────────────────
 
@@ -3948,6 +4268,11 @@ async def test_that_numerical_priority_filtering_removes_dependent_when_dependen
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 async def test_that_numerical_priority_filtering_keeps_dependent_when_dependency_shares_highest_priority(
     container: Container,
@@ -3982,6 +4307,10 @@ async def test_that_numerical_priority_filtering_keeps_dependent_when_dependency
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
 
 
 async def test_that_numerical_priority_filtering_cascades_through_tag_dependency(
@@ -4025,6 +4354,11 @@ async def test_that_numerical_priority_filtering_cascades_through_tag_dependency
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
+
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
 
 
 async def test_that_numerical_priority_filtering_with_tag_any_keeps_dependent_when_one_member_survives(
@@ -4070,6 +4404,11 @@ async def test_that_numerical_priority_filtering_with_tag_any_keeps_dependent_wh
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g3.id}
 
+    # Resolution assertions
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 # ── TAG_ALL vs TAG_ANY explicit tests ──────────────────────────────────────
 
@@ -4112,6 +4451,9 @@ async def test_that_tag_all_dependency_filters_when_not_all_members_matched(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g2.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_all_dependency_survives_when_all_members_matched(
     container: Container,
@@ -4150,6 +4492,10 @@ async def test_that_tag_all_dependency_survives_when_all_members_matched(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
 
 
 async def test_that_tag_any_dependency_survives_when_one_of_two_members_matched(
@@ -4190,6 +4536,9 @@ async def test_that_tag_any_dependency_survives_when_one_of_two_members_matched(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+
 
 async def test_that_tag_any_dependency_filters_when_no_members_matched(
     container: Container,
@@ -4228,6 +4577,8 @@ async def test_that_tag_any_dependency_filters_when_no_members_matched(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
 
 async def test_that_mixed_tag_all_and_tag_any_dependencies_both_evaluated(
@@ -4280,6 +4631,11 @@ async def test_that_mixed_tag_all_and_tag_any_dependencies_both_evaluated(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id, g4.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
+
 
 async def test_that_mixed_tag_all_and_tag_any_filters_when_tag_all_not_fully_met(
     container: Container,
@@ -4331,6 +4687,10 @@ async def test_that_mixed_tag_all_and_tag_any_filters_when_tag_all_not_fully_met
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g2.id, g4.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
+
 
 # ── DEPENDENCY_ANY (OR group) tests ────────────────────────────────────────
 
@@ -4373,6 +4733,9 @@ async def test_that_dependency_any_group_survives_when_one_target_is_matched(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+
 
 async def test_that_dependency_any_group_filters_when_no_target_is_matched(
     container: Container,
@@ -4411,6 +4774,8 @@ async def test_that_dependency_any_group_filters_when_no_target_is_matched(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ANY])
 
 
 async def test_that_mixed_dependency_all_and_dependency_any_requires_both(
@@ -4462,6 +4827,10 @@ async def test_that_mixed_dependency_all_and_dependency_any_requires_both(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g4.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
+
 
 async def test_that_mixed_dependency_all_and_dependency_any_filters_when_and_dep_unmet(
     container: Container,
@@ -4509,6 +4878,9 @@ async def test_that_mixed_dependency_all_and_dependency_any_filters_when_and_dep
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g4.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
 
 
 async def test_that_two_dependency_any_groups_are_anded_together(
@@ -4560,6 +4932,9 @@ async def test_that_two_dependency_any_groups_are_anded_together(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g2.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ANY])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
 
 
 # ── DEPENDENCY_ANY edge case tests ─────────────────────────────────────────
@@ -4617,6 +4992,10 @@ async def test_that_dependency_any_group_with_tag_all_target_falls_back_to_guide
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g4.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
 
 
 async def test_that_dependency_any_group_with_journey_targets_survives_when_one_journey_is_active(
@@ -4680,6 +5059,9 @@ async def test_that_dependency_any_group_with_journey_targets_survives_when_one_
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, j1_g.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, j1_g.id, [ResolutionKind.NONE])
+
 
 async def test_that_dependency_any_group_survives_when_one_target_cascading_fails_but_another_survives(
     container: Container,
@@ -4729,6 +5111,10 @@ async def test_that_dependency_any_group_survives_when_one_target_cascading_fail
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g3.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 async def test_that_dependency_any_group_survives_when_priority_removes_one_target_but_another_survives(
     container: Container,
@@ -4769,6 +5155,11 @@ async def test_that_dependency_any_group_survives_when_priority_removes_one_targ
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g3.id, g4.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
 
 
 async def test_that_tag_all_dependency_cascades_when_one_member_own_dependency_fails(
@@ -4820,6 +5211,10 @@ async def test_that_tag_all_dependency_cascades_when_one_member_own_dependency_f
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g2.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 async def test_that_single_target_dependency_any_group_filters_when_target_not_matched(
     container: Container,
@@ -4854,6 +5249,8 @@ async def test_that_single_target_dependency_any_group_filters_when_target_not_m
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == set()
+
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ANY])
 
 
 async def test_that_shared_target_in_dependency_all_and_dependency_any_survives_when_shared_target_matched(
@@ -4903,6 +5300,9 @@ async def test_that_shared_target_in_dependency_all_and_dependency_any_survives_
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+
 
 async def test_that_shared_target_in_dependency_all_and_dependency_any_filters_when_shared_target_not_matched(
     container: Container,
@@ -4951,6 +5351,9 @@ async def test_that_shared_target_in_dependency_all_and_dependency_any_filters_w
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g3.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 async def test_that_numerical_priority_does_not_filter_entailer_when_entailed_has_higher_priority(
     container: Container,
@@ -4986,6 +5389,9 @@ async def test_that_numerical_priority_does_not_filter_entailer_when_entailed_ha
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.ENTAILED])
 
 
 async def test_that_chained_entailment_activates_all_linked_guidelines(
@@ -5030,6 +5436,10 @@ async def test_that_chained_entailment_activates_all_linked_guidelines(
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.ENTAILED])
+    assert_resolutions(result, g3.id, [ResolutionKind.ENTAILED])
+
 
 async def test_that_entailed_guideline_is_filtered_when_its_dependency_is_unmet(
     container: Container,
@@ -5071,6 +5481,11 @@ async def test_that_entailed_guideline_is_filtered_when_its_dependency_is_unmet(
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(
+        result, g2.id, [ResolutionKind.ENTAILED, ResolutionKind.UNMET_DEPENDENCY_ALL]
+    )
 
 
 async def test_that_entailed_guideline_survives_when_its_dependency_any_group_is_met(
@@ -5119,6 +5534,10 @@ async def test_that_entailed_guideline_survives_when_its_dependency_any_group_is
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id}
 
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.ENTAILED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
 
 async def test_that_relational_priority_on_dependency_any_target_does_not_break_group_when_sibling_survives(
     container: Container,
@@ -5166,6 +5585,11 @@ async def test_that_relational_priority_on_dependency_any_target_does_not_break_
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g3.id, g4.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
 
 
 async def test_that_dependency_any_group_with_tag_all_target_succeeds_when_all_members_matched(
@@ -5218,3 +5642,192 @@ async def test_that_dependency_any_group_with_tag_all_target_succeeds_when_all_m
 
     result_ids = {m.guideline.id for m in result.matches}
     assert result_ids == {g1.id, g2.id, g3.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
+
+# ── Resolution attribution edge-case tests ────────────────────────────────
+
+
+async def test_that_priority_chain_produces_single_deprioritized_per_entity(
+    container: Container,
+) -> None:
+    """
+    A prioritizes over B, B prioritizes over C. All matched.
+    Each deprioritized entity should have exactly ONE DEPRIORITIZED resolution.
+
+    Note: priority uses indirect=True (necessary for tag-mediated chains),
+    so attribution may reference a transitive source. The key invariant
+    is: exactly one DEPRIORITIZED resolution per entity, never duplicates.
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g_a = await guideline_store.create_guideline(condition="a", action="action A")
+    g_b = await guideline_store.create_guideline(condition="b", action="action B")
+    g_c = await guideline_store.create_guideline(condition="c", action="action C")
+
+    # A prio over B
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g_a.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g_b.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    # B prio over C
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g_b.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g_c.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    result = await resolver.resolve(
+        [g_a, g_b, g_c],
+        [
+            GuidelineMatch(guideline=g_a, score=10, rationale=""),
+            GuidelineMatch(guideline=g_b, score=8, rationale=""),
+            GuidelineMatch(guideline=g_c, score=6, rationale=""),
+        ],
+        journeys=[],
+    )
+
+    assert result.matches == [GuidelineMatch(guideline=g_a, score=10, rationale="")]
+
+    assert_resolutions(result, g_a.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g_b.id, [ResolutionKind.DEPRIORITIZED])
+    assert_resolutions(result, g_c.id, [ResolutionKind.DEPRIORITIZED])
+
+    # Each deprioritized entity has exactly one resolution (no duplicates)
+    b_res = get_resolutions_by_kind(result, g_b.id, ResolutionKind.DEPRIORITIZED)
+    assert len(b_res) == 1
+    c_res = get_resolutions_by_kind(result, g_c.id, ResolutionKind.DEPRIORITIZED)
+    assert len(c_res) == 1
+
+
+async def test_that_transitive_deprioritized_dependency_records_only_direct_resolution(
+    container: Container,
+) -> None:
+    """
+    A depends on B, B depends on C. X deprioritizes C.
+    Expected: C deprioritized by X. B gets DEPRIORITIZED (dep on deprioritized C).
+    A gets UNMET_DEPENDENCY_ALL (dep on B, which was removed).
+    Each entity has exactly ONE resolution — no transitive duplicates.
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g_a = await guideline_store.create_guideline(condition="a", action="action A")
+    g_b = await guideline_store.create_guideline(condition="b", action="action B")
+    g_c = await guideline_store.create_guideline(condition="c", action="action C")
+    g_x = await guideline_store.create_guideline(condition="x", action="action X")
+
+    # A depends on B
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g_a.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g_b.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.DEPENDENCY,
+    )
+
+    # B depends on C
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g_b.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g_c.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.DEPENDENCY,
+    )
+
+    # X prioritizes over C
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g_x.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g_c.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    result = await resolver.resolve(
+        [g_a, g_b, g_c, g_x],
+        [
+            GuidelineMatch(guideline=g_a, score=10, rationale=""),
+            GuidelineMatch(guideline=g_b, score=8, rationale=""),
+            GuidelineMatch(guideline=g_c, score=6, rationale=""),
+            GuidelineMatch(guideline=g_x, score=9, rationale=""),
+        ],
+        journeys=[],
+    )
+
+    # Only X should survive
+    assert len(result.matches) == 1
+    assert result.matches[0].guideline.id == g_x.id
+
+    assert_resolutions(result, g_x.id, [ResolutionKind.NONE])
+    # C deprioritized by X (relational priority)
+    assert_resolutions(result, g_c.id, [ResolutionKind.DEPRIORITIZED])
+    # B removed because its dependency (C) was deprioritized — single resolution
+    assert_resolutions(result, g_b.id, [ResolutionKind.DEPRIORITIZED])
+    # A removed because its dependency (B) is gone — single resolution
+    assert_resolutions(result, g_a.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+
+
+async def test_that_journey_tag_guideline_journey_tag_dependency_cascades(
+    container: Container,
+) -> None:
+    """
+    Cross-entity cascade: J1 node depends on G, G depends on J2 tag, J2 not active.
+    Expected: G filtered (dep on J2 unmet), J1 node filtered (dep on G unmet).
+    Each gets exactly one resolution.
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    journey_store = container[JourneyStore]
+    resolver = container[RelationalResolver]
+
+    # Create J1 (active) and its node guideline
+    j1 = await journey_store.create_journey(title="J1", description="Journey 1", conditions=[])
+    j1_g = await guideline_store.create_guideline(
+        condition="a",
+        action="j1 action",
+        metadata={"journey_node": {"journey_id": j1.id}},
+    )
+
+    # Create standalone guideline G
+    g = await guideline_store.create_guideline(condition="b", action="bridge action")
+
+    # Create J2 (NOT active — won't be in journeys list)
+    j2 = await journey_store.create_journey(title="J2", description="Journey 2", conditions=[])
+
+    # J1 tag depends on G
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(
+            id=Tag.for_journey_id(j1.id).id, kind=RelationshipEntityKind.TAG_ALL
+        ),
+        target=RelationshipEntity(id=g.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.DEPENDENCY,
+    )
+
+    # G depends on J2 tag
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(
+            id=Tag.for_journey_id(j2.id).id, kind=RelationshipEntityKind.TAG_ALL
+        ),
+        kind=RelationshipKind.DEPENDENCY,
+    )
+
+    result = await resolver.resolve(
+        [j1_g, g],
+        [
+            GuidelineMatch(guideline=j1_g, score=10, rationale=""),
+            GuidelineMatch(guideline=g, score=8, rationale=""),
+        ],
+        journeys=[j1],  # J2 NOT active
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == set()
+
+    # G: dep on J2 tag unmet (J2 not active) — single resolution
+    assert_resolutions(result, g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+    # J1 node: dep on G unmet (G was filtered) — single resolution
+    assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
