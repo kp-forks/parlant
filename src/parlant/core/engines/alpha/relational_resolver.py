@@ -813,7 +813,7 @@ class RelationalResolver:
         for journey in journeys:
             journey_tag = Tag.for_journey_id(journey.id).id
             rels = await self._get_relationships(
-                cache, RelationshipKind.PRIORITY, True, target_id=journey_tag
+                cache, RelationshipKind.PRIORITY, False, target_id=journey_tag
             )
             for rel in rels:
                 if rel.source.kind.is_tag:
@@ -875,14 +875,27 @@ class RelationalResolver:
                             prioritized_guideline_id = pid
                             break
 
-                    # Traverse into tag members for further priority checks
+                    # Traverse into tag members for further priority checks.
+                    # For each unmatched member, check both direct guidelines
+                    # and their custom tags (so G1→T1 is found via member G2's
+                    # tag T1 when T1 is the source of the priority relationship).
                     for g in tag_guidelines:
                         if g.id not in iterated and g.id not in match_ids:
                             priority_rels.extend(
                                 await self._get_relationships(
-                                    cache, RelationshipKind.PRIORITY, True, target_id=g.id
+                                    cache, RelationshipKind.PRIORITY, False, target_id=g.id
                                 )
                             )
+                            for g_tid in g.tags:
+                                if not Tag.extract_journey_id(g_tid):
+                                    priority_rels.extend(
+                                        await self._get_relationships(
+                                            cache,
+                                            RelationshipKind.PRIORITY,
+                                            False,
+                                            target_id=g_tid,
+                                        )
+                                    )
                     iterated.update(g.id for g in tag_guidelines if g.id not in match_ids)
 
                     if jid := Tag.extract_journey_id(cast(TagId, source.id)):
@@ -938,7 +951,7 @@ class RelationalResolver:
         for journey in journeys:
             journey_tag = Tag.for_journey_id(journey.id).id
             rels = await self._get_relationships(
-                cache, RelationshipKind.PRIORITY, True, target_id=journey_tag
+                cache, RelationshipKind.PRIORITY, False, target_id=journey_tag
             )
             for rel in rels:
                 if (
@@ -966,14 +979,15 @@ class RelationalResolver:
         match: GuidelineMatch,
         cache: _RelationshipCache,
     ) -> list[Relationship]:
-        """Gather all PRIORITY relationships targeting this match.
+        """Gather all PRIORITY relationships directly targeting this match.
 
-        Uses ``indirect=True`` because priority chains can go through tags
-        (e.g. G1 → T1 → G2), and tags are not tracked in the match set,
-        so the iteration loop cannot cascade through them.
+        Uses ``indirect=False`` so that priority does not propagate through
+        inactive intermediaries (reinstatement principle). Tag-mediated
+        chains (e.g. G1 → T1 → G2) still work because we explicitly query
+        each of the guideline's tags as additional targets.
         """
         rels = await self._get_relationships(
-            cache, RelationshipKind.PRIORITY, True, target_id=match.guideline.id
+            cache, RelationshipKind.PRIORITY, False, target_id=match.guideline.id
         )
 
         # Journey node guidelines also inherit journey-level priority
@@ -983,7 +997,7 @@ class RelationalResolver:
                     await self._get_relationships(
                         cache,
                         RelationshipKind.PRIORITY,
-                        True,
+                        False,
                         target_id=Tag.for_journey_id(jid).id,
                     )
                 )
@@ -993,7 +1007,9 @@ class RelationalResolver:
             if Tag.extract_journey_id(tid):
                 continue
             rels.extend(
-                await self._get_relationships(cache, RelationshipKind.PRIORITY, True, target_id=tid)
+                await self._get_relationships(
+                    cache, RelationshipKind.PRIORITY, False, target_id=tid
+                )
             )
 
         return rels

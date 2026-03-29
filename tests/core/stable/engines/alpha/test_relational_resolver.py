@@ -640,6 +640,9 @@ async def test_that_relational_resolver_does_not_ignore_a_deprioritized_tag_when
 
     await guideline_store.upsert_tag(deprioritized_guideline.id, deprioritized_tag.id)
 
+    # Re-read after tagging so guideline.tags is up-to-date
+    deprioritized_guideline = await guideline_store.read_guideline(deprioritized_guideline.id)
+
     await relationship_store.create_relationship(
         source=RelationshipEntity(
             id=prioritized_guideline.id,
@@ -692,6 +695,9 @@ async def test_that_relational_resolver_prioritizes_guidelines_from_tags(
     t1 = await tag_store.create_tag(name="t1")
 
     await guideline_store.upsert_tag(g2.id, t1.id)
+
+    # Re-read after tagging so guideline.tags is up-to-date
+    g2 = await guideline_store.read_guideline(g2.id)
 
     await relationship_store.create_relationship(
         source=RelationshipEntity(
@@ -748,6 +754,9 @@ async def test_that_relational_resolver_handles_indirect_guidelines_from_tags(
     t1 = await tag_store.create_tag(name="t1")
 
     await guideline_store.upsert_tag(g2.id, t1.id)
+
+    # Re-read after tagging so guideline.tags is up-to-date
+    g2 = await guideline_store.read_guideline(g2.id)
 
     await relationship_store.create_relationship(
         source=RelationshipEntity(
@@ -5656,16 +5665,13 @@ async def test_that_dependency_any_group_with_tag_all_target_succeeds_when_all_m
 # ── Resolution attribution edge-case tests ────────────────────────────────
 
 
-async def test_that_priority_chain_produces_single_deprioritized_per_entity(
+async def test_that_priority_chain_attributes_to_direct_deprioritizer(
     container: Container,
 ) -> None:
     """
     A prioritizes over B, B prioritizes over C. All matched.
-    Each deprioritized entity should have exactly ONE DEPRIORITIZED resolution.
-
-    Note: priority uses indirect=True (necessary for tag-mediated chains),
-    so attribution may reference a transitive source. The key invariant
-    is: exactly one DEPRIORITIZED resolution per entity, never duplicates.
+    B should be attributed to A (direct deprioritizer).
+    C should be attributed to B (direct deprioritizer), NOT A (transitive).
     """
     relationship_store = container[RelationshipStore]
     guideline_store = container[GuidelineStore]
@@ -5705,11 +5711,15 @@ async def test_that_priority_chain_produces_single_deprioritized_per_entity(
     assert_resolutions(result, g_b.id, [ResolutionKind.DEPRIORITIZED])
     assert_resolutions(result, g_c.id, [ResolutionKind.DEPRIORITIZED])
 
-    # Each deprioritized entity has exactly one resolution (no duplicates)
+    # B deprioritized by A (direct)
     b_res = get_resolutions_by_kind(result, g_b.id, ResolutionKind.DEPRIORITIZED)
     assert len(b_res) == 1
+    assert g_a.id in b_res[0].details.target_ids
+
+    # C deprioritized by B (direct), NOT by A (transitive)
     c_res = get_resolutions_by_kind(result, g_c.id, ResolutionKind.DEPRIORITIZED)
     assert len(c_res) == 1
+    assert g_b.id in c_res[0].details.target_ids
 
 
 async def test_that_transitive_deprioritized_dependency_records_only_direct_resolution(
@@ -5836,3 +5846,62 @@ async def test_that_journey_tag_guideline_journey_tag_dependency_cascades(
     assert_resolutions(result, g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
     # J1 node: dep on G unmet (G was filtered) — single resolution
     assert_resolutions(result, j1_g.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
+
+
+async def test_that_priority_chain_with_gaps_does_not_transitively_deprioritize(
+    container: Container,
+) -> None:
+    """
+    G1 → G2 → G3 → G4 (priority chain).
+    Only G2 and G4 are matched.
+    G2's direct deprioritizer (G1) is not matched → G2 survives.
+    G4's direct deprioritizer (G3) is not matched → what happens to G4?
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="action 1")
+    g2 = await guideline_store.create_guideline(condition="b", action="action 2")
+    g3 = await guideline_store.create_guideline(condition="c", action="action 3")
+    g4 = await guideline_store.create_guideline(condition="d", action="action 4")
+
+    # G1 prio over G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    # G2 prio over G3
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    # G3 prio over G4
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g4.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.PRIORITY,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3, g4],
+        [
+            # Only G2 and G4 matched
+            GuidelineMatch(guideline=g2, score=8, rationale=""),
+            GuidelineMatch(guideline=g4, score=6, rationale=""),
+        ],
+        journeys=[],
+    )
+
+    # Both survive: G2's deprioritizer (G1) is not matched, and G4's
+    # deprioritizer (G3) is not matched.  Priority does NOT propagate
+    # through inactive intermediaries (reinstatement principle).
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g2.id, g4.id}
+
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g4.id, [ResolutionKind.NONE])
