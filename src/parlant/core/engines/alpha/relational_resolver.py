@@ -297,19 +297,20 @@ class RelationalResolver:
                         usable_guidelines, new_matches, cache, guidelines_by_tag
                     )
                     entailed: list[GuidelineMatch] = []
-                    for m, rel_id in entailed_with_rels:
+                    for m, rel_ids in entailed_with_rels:
                         if m.guideline.id not in deactivated_ids:
                             entailed.append(m)
                             entailed_ids.add(m.guideline.id)
-                            resolutions.setdefault(m.guideline.id, []).append(
-                                Resolution(
-                                    kind=ResolutionKind.ENTAILED,
-                                    details=ResolutionDetails(
-                                        description=("Activated via entailment"),
-                                        relationship_id=rel_id,
-                                    ),
+                            for rel_id in rel_ids:
+                                resolutions.setdefault(m.guideline.id, []).append(
+                                    Resolution(
+                                        kind=ResolutionKind.ENTAILED,
+                                        details=ResolutionDetails(
+                                            description=("Activated via entailment"),
+                                            relationship_id=rel_id,
+                                        ),
+                                    )
                                 )
-                            )
                     new_matches = list(new_matches) + entailed
 
                     if self._matches_equal(new_matches, current_matches) and self._journeys_equal(
@@ -1175,13 +1176,15 @@ class RelationalResolver:
         matches: Sequence[GuidelineMatch],
         cache: _RelationshipCache,
         guidelines_by_tag: dict[TagId, list[Guideline]],
-    ) -> list[tuple[GuidelineMatch, RelationshipId | None]]:
+    ) -> list[tuple[GuidelineMatch, list[RelationshipId | None]]]:
         """Activate additional guidelines implied by entailment relationships.
 
-        Returns a list of (entailed_match, relationship_id) tuples so the caller
-        can create ENTAILED resolutions.
+        Returns a list of ``(entailed_match, relationship_ids)`` tuples.
+        Each tuple contains the match to add and ALL relationship IDs that
+        contributed to this entailment (one per entailing source). The caller
+        can create ENTAILED resolutions for each relationship ID.
         """
-        # Map: guideline -> (entailing match, relationship_id)
+        # Map: guideline -> (entailing match, target guideline, relationship_id)
         related_by_match: dict[
             GuidelineId, list[tuple[GuidelineMatch, Guideline, RelationshipId | None]]
         ] = defaultdict(list)
@@ -1212,30 +1215,33 @@ class RelationalResolver:
                             )
                         )
 
-        # Deduplicate: each inferred guideline is associated with the
-        # highest-scoring match that entails it.
-        pairs: list[tuple[GuidelineMatch, Guideline, RelationshipId | None]] = []
+        # For each entailed guideline: use the highest-scoring match for the
+        # GuidelineMatch, but collect ALL relationship IDs from every source.
+        result: list[tuple[GuidelineMatch, list[RelationshipId | None]]] = []
         seen_guidelines: set[GuidelineId] = set()
         for gid, entries in related_by_match.items():
+            if gid in seen_guidelines:
+                continue
+            seen_guidelines.add(gid)
+
             best: tuple[GuidelineMatch, Guideline, RelationshipId | None] | None = None
             for entry in entries:
                 if best is None or entry[0].score > best[0].score:
                     best = entry
-            if best is not None and gid not in seen_guidelines:
-                pairs.append(best)
-                seen_guidelines.add(gid)
+            if best is not None:
+                all_rel_ids = [entry[2] for entry in entries]
+                result.append(
+                    (
+                        GuidelineMatch(
+                            guideline=best[1],
+                            score=best[0].score,
+                            rationale="[Activated via entailment] Automatically inferred from context",
+                        ),
+                        all_rel_ids,
+                    )
+                )
 
-        return [
-            (
-                GuidelineMatch(
-                    guideline=guideline,
-                    score=match.score,
-                    rationale="[Activated via entailment] Automatically inferred from context",
-                ),
-                rel_id,
-            )
-            for match, guideline, rel_id in pairs
-        ]
+        return result
 
     # -- Shared helpers -----------------------------------------------------
 

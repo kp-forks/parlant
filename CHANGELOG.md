@@ -9,6 +9,7 @@ All notable changes to Parlant will be documented here.
 - Add `AnyOf(tag)` and `AllOf(tag)` modifiers for explicit control over tag dependency semantics in `depend_on()` — `AnyOf` requires at least one tagged member to be active, `AllOf` requires all of them (bare `Tag` defaults to `AllOf`)
 - Add `depend_on_any()` to `Guideline`, `Tag`, and `Journey` for OR dependency relationships — at least one target must be active. Multiple `depend_on_any()` calls create independent OR groups that are AND'd together
 - Add event loop health monitoring to `/healthz` endpoint — measures callback latency and reports `healthy`, `degraded`, or `unhealthy` status with peak latency over a configurable window
+- Add resolution tracking to the relational resolver — every entity that enters resolution gets a `Resolution` with a `ResolutionKind` (`NONE`, `DEPRIORITIZED`, `UNMET_DEPENDENCY_ALL`, `UNMET_DEPENDENCY_ANY`, `ENTAILED`) and structured `ResolutionDetails` (relationship ID, target IDs) explaining why
 
 ### Changed
 
@@ -17,6 +18,7 @@ All notable changes to Parlant will be documented here.
 ### Fixed
 
 - Fix priority and dependency relationships propagating through inactive intermediaries — only direct relationships now affect resolution, consistent with the reinstatement principle from argumentation theory
+- Fix entailment recording only the highest-scoring source when multiple guidelines entail the same target — all entailing relationships are now recorded in resolution details
 - Fix `Variable.get_value()` returning `None` when called from a retriever, caused by retrievers starting before context variables were loaded
 
 ## [3.3.0] - 2025-03-15

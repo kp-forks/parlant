@@ -5905,3 +5905,95 @@ async def test_that_priority_chain_with_gaps_does_not_transitively_deprioritize(
 
     assert_resolutions(result, g2.id, [ResolutionKind.NONE])
     assert_resolutions(result, g4.id, [ResolutionKind.NONE])
+
+
+async def test_that_already_matched_entailment_target_gets_none_not_entailed(
+    container: Container,
+) -> None:
+    """
+    G1 entails G2. Both G1 and G2 are already matched.
+    G2 should get NONE because it was already active — entailment
+    was not needed to bring it in.
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+
+    # G1 entails G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            GuidelineMatch(guideline=g2, score=8, rationale=""),  # Already matched
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id}
+
+    # Both get NONE — G2 was already active, entailment was unnecessary
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+
+
+async def test_that_guideline_entailed_by_two_sources_records_both_entailment_resolutions(
+    container: Container,
+) -> None:
+    """
+    G1 entails G3, G2 entails G3. G1 and G2 are matched, G3 is not.
+    G3 should have TWO ENTAILED resolutions — one for each source.
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
+
+    # G1 entails G3
+    r1 = await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    # G2 entails G3
+    r2 = await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            GuidelineMatch(guideline=g2, score=8, rationale=""),
+            # G3 NOT matched — activated via entailment from both G1 and G2
+        ],
+        journeys=[],
+    )
+
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id, g3.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g3.id, [ResolutionKind.ENTAILED, ResolutionKind.ENTAILED])
+
+    # Both entailment relationships should be referenced
+    g3_res = get_resolutions_by_kind(result, g3.id, ResolutionKind.ENTAILED)
+    assert len(g3_res) == 2
+    rel_ids = {r.details.relationship_id for r in g3_res}
+    assert rel_ids == {r1.id, r2.id}
