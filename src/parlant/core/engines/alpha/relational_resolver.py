@@ -244,16 +244,53 @@ class RelationalResolver:
 
                 initial_match_ids = {m.guideline.id for m in matches}
                 initial_journey_ids = {j.id for j in journeys}
+                # Keep the full original match list so that dep-failed
+                # guidelines can be re-evaluated when entailment expands
+                # the match set in a later iteration.
+                all_candidate_matches: dict[GuidelineId, GuidelineMatch] = {
+                    m.guideline.id: m for m in matches
+                }
                 current_matches = list(matches)
                 current_journeys = list(journeys)
                 entailed_ids: set[GuidelineId] = set()
+                # Track guidelines removed by priority (relational or
+                # numerical) — these must NOT be re-seeded because their
+                # removal is authoritative, not contingent on match-set
+                # expansion.
+                priority_removed: set[GuidelineId] = set()
 
                 for iteration in range(self.MAX_ITERATIONS):
                     self._logger.trace(f"RelationalResolver iteration {iteration + 1}")
 
+                    # Re-seed: start from all candidates (original matches
+                    # + entailed) minus those removed by priority.  This
+                    # lets dep-failed guidelines be re-evaluated when the
+                    # match set expanded (e.g. entailment added a dep
+                    # target that was missing in the previous iteration).
+                    # Clear stale dep-failure resolutions so they aren't
+                    # duplicated if the guideline is re-evaluated.
+                    candidate_ids = set(all_candidate_matches.keys()) - priority_removed
+                    reseeded = [all_candidate_matches[gid] for gid in candidate_ids]
+
+                    # Clear dep-failure resolutions for re-seeded
+                    # guidelines so they can get fresh evaluations.
+                    for gid in candidate_ids:
+                        if gid in resolutions:
+                            resolutions[gid] = [
+                                r
+                                for r in resolutions[gid]
+                                if r.kind
+                                not in (
+                                    ResolutionKind.UNMET_DEPENDENCY_ALL,
+                                    ResolutionKind.UNMET_DEPENDENCY_ANY,
+                                )
+                            ]
+                            if not resolutions[gid]:
+                                del resolutions[gid]
+
                     # Step 1: Dependencies
                     filtered_by_deps = await self._apply_dependencies(
-                        current_matches,
+                        reseeded,
                         current_journeys,
                         cache,
                         guidelines_by_tag,
@@ -268,6 +305,12 @@ class RelationalResolver:
                         guidelines_by_tag,
                         resolutions,
                     )
+
+                    # Track what priority removed this iteration
+                    post_prio_ids = {m.guideline.id for m in prio_result.matches}
+                    for m in filtered_by_deps:
+                        if m.guideline.id not in post_prio_ids:
+                            priority_removed.add(m.guideline.id)
 
                     # Step 3: Numerical priority filtering.
                     # Entailed guidelines are excluded — they were activated by
@@ -285,22 +328,29 @@ class RelationalResolver:
                     )
                     new_matches = filtered_non_entailed + entailed_matches
 
+                    # Track numerical-priority removals
+                    post_num_ids = {m.guideline.id for m in new_matches}
+                    for m in list(prio_result.matches):
+                        if m.guideline.id not in post_num_ids:
+                            priority_removed.add(m.guideline.id)
+
                     # Step 4: Entailment.
-                    # Exclude guidelines that were deactivated (by deps, priority, etc.)
-                    # so that entailment doesn't re-add them in an infinite loop.
-                    deactivated_ids = {
-                        eid
-                        for eid, res_list in resolutions.items()
-                        if any(r.kind != ResolutionKind.NONE for r in res_list)
-                    }
+                    # Exclude guidelines that were removed by priority — they
+                    # must not be re-added.  Dep-failed guidelines are NOT
+                    # excluded here: they may be re-seeded in the next
+                    # iteration once the entailed guideline is available.
                     entailed_with_rels = await self._apply_entailment(
                         usable_guidelines, new_matches, cache, guidelines_by_tag
                     )
                     entailed: list[GuidelineMatch] = []
                     for m, rel_ids in entailed_with_rels:
-                        if m.guideline.id not in deactivated_ids:
+                        if (
+                            m.guideline.id not in priority_removed
+                            and m.guideline.id not in entailed_ids
+                        ):
                             entailed.append(m)
                             entailed_ids.add(m.guideline.id)
+                            all_candidate_matches[m.guideline.id] = m
                             for rel_id in rel_ids:
                                 resolutions.setdefault(m.guideline.id, []).append(
                                     Resolution(

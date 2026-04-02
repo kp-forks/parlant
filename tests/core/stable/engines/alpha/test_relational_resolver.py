@@ -5997,3 +5997,58 @@ async def test_that_guideline_entailed_by_two_sources_records_both_entailment_re
     assert len(g3_res) == 2
     rel_ids = {r.details.relationship_id for r in g3_res}
     assert rel_ids == {r1.id, r2.id}
+
+
+async def test_that_entailed_guideline_satisfies_dependency_of_matched_guideline(
+    container: Container,
+) -> None:
+    """
+    G3 depends on G2. G1 entails G2.
+    G1 and G3 are matched, G2 is not.
+    Iteration 1: G3's dep on G2 fails (G2 not yet in matches).
+                 Entailment adds G2.
+    Iteration 2: G2 is now in matches, G3's dep on G2 is satisfied.
+    Result: {G1, G2, G3}
+    """
+    relationship_store = container[RelationshipStore]
+    guideline_store = container[GuidelineStore]
+    resolver = container[RelationalResolver]
+
+    g1 = await guideline_store.create_guideline(condition="a", action="g1 action")
+    g2 = await guideline_store.create_guideline(condition="b", action="g2 action")
+    g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
+
+    # G1 entails G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.ENTAILMENT,
+    )
+
+    # G3 depends on G2
+    await relationship_store.create_relationship(
+        source=RelationshipEntity(id=g3.id, kind=RelationshipEntityKind.GUIDELINE),
+        target=RelationshipEntity(id=g2.id, kind=RelationshipEntityKind.GUIDELINE),
+        kind=RelationshipKind.DEPENDENCY,
+    )
+
+    result = await resolver.resolve(
+        [g1, g2, g3],
+        [
+            GuidelineMatch(guideline=g1, score=10, rationale=""),
+            # G2 NOT matched — will be entailed by G1
+            GuidelineMatch(guideline=g3, score=8, rationale=""),
+        ],
+        journeys=[],
+    )
+
+    # All three should survive:
+    # - Iteration 1: G3's dep on G2 fails (G2 not yet matched).
+    #   Entailment adds G2. Match set changed → iterate.
+    # - Iteration 2: G2 is now available. G3's dep on G2 is satisfied.
+    result_ids = {m.guideline.id for m in result.matches}
+    assert result_ids == {g1.id, g2.id, g3.id}
+
+    assert_resolutions(result, g1.id, [ResolutionKind.NONE])
+    assert_resolutions(result, g2.id, [ResolutionKind.ENTAILED])
+    assert_resolutions(result, g3.id, [ResolutionKind.NONE])
