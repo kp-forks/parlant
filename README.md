@@ -71,9 +71,9 @@ Parlant was designed around a simple idea: developers should be able to control 
 
 Parlant treats misalignment as a core design problem. It builds on [research into model accuracy and consistency](https://arxiv.org/abs/2503.03669#:~:text=We%20present%20Attentive%20Reasoning%20Queries%20%28ARQs%29%2C%20a%20novel,in%20Large%20Language%20Models%20through%20domain-specialized%20reasoning%20blueprints.) so that it is structurally harder for the agent to behave outside its intended boundaries, and easier to detect and correct when it does. Rather than bolting guardrails onto the output, Parlant applies constraints and control points into how your LLMs are used in the first place to produce safe and correct output.
 
-### 3. Fastest path from business expert to agent behavior
+### 3. Fastest path from product feedback to implementation
 
-Parlant is designed so that those responsible for the agent's conversational experience can shape its behavior directly in a rapid feedback cycle that engineers can support. Parlant seeks to enable you to express and apply new instructions as directly as possible, without manual rewiring of graphs or model fine-tuning, ensuring that valuable engineering time is only needed for deeper structural changes, not minor behavior adjustments.
+Parlant seeks to allow those responsible for the agent's conversational experience  to shape its behavior in an intuitive manner, enabling a rapid feedback cycle that engineers can accomodate. Parlant is designed to allow you to incorporate ongoing product feedback as quickly as possible, without manual rewiring of graphs or fine-tuning of models, ensuring that valuable engineering time is only needed for deeper changes, not minor adjustments.
 
 ## Getting started
 
