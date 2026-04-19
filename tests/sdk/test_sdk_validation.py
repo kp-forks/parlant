@@ -466,15 +466,15 @@ class Test_that_journey_transitions_reject_invalid_parameters(SDKTest):
             in str(exc_info.value)
         )
 
-        # Test journey + on_match (should fail)
-        async def on_match_handler(ctx: object, match: object) -> None:
+        # Test journey + on_selected (should fail)
+        async def on_selected_handler(ctx: object, match: object) -> None:
             pass
 
         with pytest.raises(p.SDKError) as exc_info:
             await self.journey.initial_state.transition_to(  # type: ignore[call-overload]
-                journey=self.sub_journey, on_match=on_match_handler
+                journey=self.sub_journey, on_selected=on_selected_handler
             )
-        assert "Journey transitions do not support the following parameters: on_match" in str(
+        assert "Journey transitions do not support the following parameters: on_selected" in str(
             exc_info.value
         )
 
@@ -494,13 +494,13 @@ class Test_that_journey_transitions_reject_invalid_parameters(SDKTest):
                 journey=self.sub_journey,
                 metadata={"test": "value"},
                 canned_responses=["response1"],
-                on_match=on_match_handler,
+                on_selected=on_selected_handler,
             )
         error_msg = str(exc_info.value)
         assert "Journey transitions do not support the following parameters:" in error_msg
         assert "metadata" in error_msg
         assert "canned_responses" in error_msg
-        assert "on_match" in error_msg
+        assert "on_selected" in error_msg
 
         # Test valid journey transition (should succeed)
         await self.journey.initial_state.transition_to(journey=self.sub_journey)
@@ -563,8 +563,8 @@ class Test_that_tool_instruction_parameter_validation_works_correctly(SDKTest):
             condition="if customer needs another tool", tool_state=self.test_tool
         )
 
-        # Test with metadata, canned_responses, on_match for tool_state (should succeed)
-        async def on_match_handler(ctx: object, match: object) -> None:
+        # Test with metadata, canned_responses, on_selected for tool_state (should succeed)
+        async def on_selected_handler(ctx: object, match: object) -> None:
             pass
 
         await tool_transition.target.transition_to(  # type: ignore[call-overload]
@@ -573,7 +573,7 @@ class Test_that_tool_instruction_parameter_validation_works_correctly(SDKTest):
             tool_instruction="Use tool with extras",
             metadata={"priority": "high"},
             canned_responses=[],
-            on_match=on_match_handler,
+            on_selected=on_selected_handler,
         )
 
 

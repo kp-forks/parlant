@@ -475,6 +475,16 @@ class JourneyBacktrackNodeSelection:
                             .incoming_edges[0]
                             .target_guideline
                         )
+
+                if matched_guideline:
+                    self._logger.debug(
+                        f"Journey '{self._examined_journey.title}': backtracked to node {inference.content.next_step}"
+                    )
+                else:
+                    self._logger.debug(
+                        f"Journey '{self._examined_journey.title}': exited after backtrack"
+                    )
+
                 return GuidelineMatchingBatchResult(
                     matches=[
                         GuidelineMatch(

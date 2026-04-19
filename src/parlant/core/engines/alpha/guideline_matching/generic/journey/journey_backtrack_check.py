@@ -342,12 +342,18 @@ This journey is not currently active. We may need to:
                 )
 
                 if not inference.content.requires_backtracking:
+                    self._logger.debug(
+                        f"Journey '{self._examined_journey.title}': no backtrack required"
+                    )
                     return BacktrackCheckResult(
                         requires_backtracking=inference.content.requires_backtracking,
                         backtrack_to_same_journey_process=False,
                         generation_info=inference.info,
                     )
                 else:
+                    self._logger.debug(
+                        f"Journey '{self._examined_journey.title}': backtrack required"
+                    )
                     return BacktrackCheckResult(
                         requires_backtracking=inference.content.requires_backtracking,
                         backtrack_to_same_journey_process=inference.content.backtrack_to_same_journey_process,

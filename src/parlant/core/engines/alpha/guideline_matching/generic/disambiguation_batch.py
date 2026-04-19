@@ -191,7 +191,11 @@ class GenericDisambiguationGuidelineMatchingBatch(GuidelineMatchingBatch):
                         metadata["disambiguation"] = disambiguation_data
 
                         self._logger.debug(
-                            f"Disambiguation activated: {inference.content.model_dump_json(indent=2)}"
+                            f"Matched (disambiguation):\n{inference.content.model_dump_json(indent=2)}"
+                        )
+                    else:
+                        self._logger.debug(
+                            f"Not matched (disambiguation):\n{inference.content.model_dump_json(indent=2)}"
                         )
 
                     matches = [

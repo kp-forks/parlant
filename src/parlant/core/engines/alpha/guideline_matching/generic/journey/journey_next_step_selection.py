@@ -260,6 +260,7 @@ class JourneyNextStepSelection:
                 if inference.content.applied_condition_id:
                     if inference.content.applied_condition_id == "None":
                         # Exit journey
+                        self._logger.debug(f"Journey '{self._examined_journey.title}': exited")
                         journey_path = list(self._previous_path) + [None]
                         return GuidelineMatchingBatchResult(
                             matches=[
@@ -279,6 +280,9 @@ class JourneyNextStepSelection:
                         )
                     elif inference.content.applied_condition_id == "0":
                         # Stay in the same node
+                        self._logger.debug(
+                            f"Journey '{self._examined_journey.title}': stayed at node {self._current_node.id}"
+                        )
                         matched_guideline = self._guideline_id_to_guideline[
                             self._node_index_to_guideline_id[self._current_node.id]
                         ]
@@ -311,6 +315,9 @@ class JourneyNextStepSelection:
                                 ].content.action
                                 is None
                             ):
+                                self._logger.debug(
+                                    f"Journey '{self._examined_journey.title}': completed"
+                                )
                                 journey_path = list(self._previous_path) + [None]
 
                                 return GuidelineMatchingBatchResult(
@@ -330,6 +337,9 @@ class JourneyNextStepSelection:
                                     generation_info=inference.info,
                                 )
                             else:
+                                self._logger.debug(
+                                    f"Journey '{self._examined_journey.title}': advanced to node {next_node}"
+                                )
                                 if not self._previous_path:
                                     # we started from the root and root was completed, so include it in journey path
                                     journey_path = cast(
@@ -355,6 +365,9 @@ class JourneyNextStepSelection:
                                     generation_info=inference.info,
                                 )
                         else:  # condition index invalid
+                            self._logger.warning(
+                                f"Journey '{self._examined_journey.title}': invalid condition id {condition_id}"
+                            )
                             return GuidelineMatchingBatchResult(
                                 matches=[],
                                 generation_info=inference.info,

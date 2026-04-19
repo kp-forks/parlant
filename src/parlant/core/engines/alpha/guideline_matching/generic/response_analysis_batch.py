@@ -190,7 +190,7 @@ class GenericResponseAnalysisBatch(ResponseAnalysisBatch):
                                 )
                             )
                         else:
-                            self._logger.debug(f"Not applied:\n{check.model_dump_json(indent=2)}")
+                            self._logger.debug(f"Unapplied:\n{check.model_dump_json(indent=2)}")
                             analyzed_guidelines.append(
                                 AnalyzedGuideline(
                                     guideline=guidelines[GuidelineId(check.guideline_id)],

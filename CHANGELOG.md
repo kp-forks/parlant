@@ -4,18 +4,33 @@ All notable changes to Parlant will be documented here.
 
 ## [Unreleased]
 
-### Security
+### Added
 
-- Upgrade dependencies to address known CVEs: authlib (>=1.6.11), requests (>=2.33.0), fastmcp (>=3.2.0), litellm (>=1.83.0), pytest (>=9.0.3), pyjwt (>=2.11.1), and constrain transitive deps — aiohttp, cryptography, pillow, pyopenssl, werkzeug, Mako, pyasn1, python-multipart, orjson, Pygments, diskcache
-- Upgrade chat frontend: vite (>=7.3.2) and override transitive deps — picomatch, lodash, flatted, brace-expansion, immutable, yaml
+- Add per-decision debug logs to journey node selection (`Journey '<title>': advanced/stayed/exited/completed/backtracked/auto-advanced/...`) so journey progression is visible at debug level alongside guideline matching
+- Add a warning log for invalid condition ids returned during journey next-step selection
 
-### Fixed
+### Changed
 
-- Fix WebSocketLogger event loop starvation — when no WebSocket clients are subscribed, the drain loop processed queued messages without yielding, progressively blocking the async event loop and causing increasing latency over time
+- Rename SDK callback `on_match` to `on_selected` on guidelines and journey state transitions to reflect that it fires post-resolution, when the entity is selected for message generation; `EngineHooks.on_guideline_match_handlers` and `on_journey_match_handlers` are renamed to `on_guideline_selected_handlers` and `on_journey_selected_handlers` accordingly
+- Standardize guideline matcher log vocabulary: `"Activated"` → `"Matched"`, `"Skipped"` → `"Not matched"`, and `"Not applied"` → `"Unapplied"`
+- Standardize relational resolver log vocabulary: `"Skipped: ... deactivated due to ..."` → `"Dropped (<reason>): ..."` with reasons `lower priority`, `unmet dependency`, `dependency on dropped entity`, `deprioritized by guideline`, and `deprioritized by journey`
+- Disambiguation batch now uses the standard matcher vocabulary (`"Matched (disambiguation)"` / `"Not matched (disambiguation)"`) and emits a log on the negative branch (previously silent)
+- Normalize observational batch rationale to plain `match.rationale` (no longer wrapped with `Condition Application Rationale: "..."`) for consistency with other batches
+- Normalize low-criticality batch warning string to `"No checks generated"` to match other batches
 
 ### Removed
 
 - Remove redundant `glm_service.py` NLP adapter and `NLPServices.glm()` factory method — the GLM/bigmodel.cn API is already covered by the existing Zhipu adapter (`zhipu_service.py`), which uses the official `zhipuai` SDK and supports GLM-4 model variants. Use `NLPServices.zhipu()` instead.
+
+### Fixed
+
+- Fix low-criticality matcher logging the entire inference blob once per guideline in a batch (N copies of the same payload at debug level); now logs a single per-item entry
+- Fix WebSocketLogger event loop starvation — when no WebSocket clients are subscribed, the drain loop processed queued messages without yielding, progressively blocking the async event loop and causing increasing latency over time
+
+### Security
+
+- Upgrade dependencies to address known CVEs: authlib (>=1.6.11), requests (>=2.33.0), fastmcp (>=3.2.0), litellm (>=1.83.0), pytest (>=9.0.3), pyjwt (>=2.11.1), and constrain transitive deps — aiohttp, cryptography, pillow, pyopenssl, werkzeug, Mako, pyasn1, python-multipart, orjson, Pygments, diskcache
+- Upgrade chat frontend: vite (>=7.3.2) and override transitive deps — picomatch, lodash, flatted, brace-expansion, immutable, yaml
 
 ## [3.3.1] - 2026-04-14
 

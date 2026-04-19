@@ -136,7 +136,7 @@ class GenericPreviouslyAppliedActionableCustomerDependentGuidelineMatchingBatch(
 
                     for match in inference.content.checks:
                         if match.should_apply:
-                            self._logger.debug(f"Activated:\n{match.model_dump_json(indent=2)}")
+                            self._logger.debug(f"Matched:\n{match.model_dump_json(indent=2)}")
 
                             matches.append(
                                 GuidelineMatch(
@@ -146,7 +146,7 @@ class GenericPreviouslyAppliedActionableCustomerDependentGuidelineMatchingBatch(
                                 )
                             )
                         else:
-                            self._logger.debug(f"Skipped:\n{match.model_dump_json(indent=2)}")
+                            self._logger.debug(f"Not matched:\n{match.model_dump_json(indent=2)}")
 
                     return GuidelineMatchingBatchResult(
                         matches=matches,

@@ -131,17 +131,17 @@ class GenericObservationalGuidelineMatchingBatch(GuidelineMatchingBatch):
 
                     for match in inference.content.checks:
                         if self._match_applies(match):
-                            self._logger.debug(f"Activated:\n{match.model_dump_json(indent=2)}")
+                            self._logger.debug(f"Matched:\n{match.model_dump_json(indent=2)}")
 
                             matches.append(
                                 GuidelineMatch(
                                     guideline=self._guidelines[match.guideline_id],
                                     score=10 if match.applies else 1,
-                                    rationale=f'''Condition Application Rationale: "{match.rationale}"''',
+                                    rationale=match.rationale,
                                 )
                             )
                         else:
-                            self._logger.debug(f"Skipped:\n{match.model_dump_json(indent=2)}")
+                            self._logger.debug(f"Not matched:\n{match.model_dump_json(indent=2)}")
 
                     return GuidelineMatchingBatchResult(
                         matches=matches,

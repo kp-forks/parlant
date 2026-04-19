@@ -1113,14 +1113,14 @@ class Test_that_end_journey_match_handlers_are_called(SDKTest):
         await confirmation_state.target.transition_to(
             condition="Customer confirms the order",
             state=p.END_JOURNEY,
-            on_match=success_exit_handler,
+            on_selected=success_exit_handler,
         )
 
         # Exit path 2: Customer cancels order (cancel path)
         await confirmation_state.target.transition_to(
             condition="Customer wants to cancel",
             state=p.END_JOURNEY,
-            on_match=cancel_exit_handler,
+            on_selected=cancel_exit_handler,
         )
 
     async def run(self, ctx: Context) -> None:
@@ -1165,7 +1165,7 @@ class Test_that_journey_state_match_handler_is_called(SDKTest):
         self.state = await self.journey.initial_state.transition_to(
             condition="Customer confirmed order",
             chat_state="Great! Your order is confirmed.",
-            on_match=state_match_handler,
+            on_selected=state_match_handler,
         )
 
     async def run(self, ctx: Context) -> None:
@@ -1948,27 +1948,27 @@ class Test_that_journey_retriever_does_not_run_when_journey_is_inactive(SDKTest)
         assert not self.retriever_called, "Retriever should not be called when journey is inactive"
 
 
-class Test_that_journey_on_match_is_called_when_journey_without_states_is_activated(SDKTest):
-    """Test that journey on_match handler is called when a journey without states is activated."""
+class Test_that_journey_on_selected_is_called_when_journey_without_states_is_activated(SDKTest):
+    """Test that journey on_selected handler is called when a journey without states is activated."""
 
     async def setup(self, server: p.Server) -> None:
-        self.on_match_called = False
+        self.on_selected_called = False
         self.captured_journey_id = None
 
-        async def on_match_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
-            self.on_match_called = True
+        async def on_selected_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
+            self.on_selected_called = True
             self.captured_journey_id = match.journey_id
 
         self.agent = await server.create_agent(
             name="Journey Handler Agent",
-            description="Agent for testing journey on_match handler",
+            description="Agent for testing journey on_selected handler",
         )
 
         self.journey = await self.agent.create_journey(
             title="Simple Journey",
             description="A journey without any states",
             conditions=["Customer asks about ordering"],
-            on_match=on_match_handler,
+            on_selected=on_selected_handler,
         )
 
         # Add a scoped guideline so the journey has some effect
@@ -1983,33 +1983,33 @@ class Test_that_journey_on_match_is_called_when_journey_without_states_is_activa
             recipient=self.agent,
         )
 
-        assert self.on_match_called, "Journey on_match handler should have been called"
+        assert self.on_selected_called, "Journey on_selected handler should have been called"
         assert self.captured_journey_id == self.journey.id, (
             f"Expected journey ID {self.journey.id}, got {self.captured_journey_id}"
         )
 
 
-class Test_that_journey_on_match_is_called_when_journey_with_states_is_activated(SDKTest):
-    """Test that journey on_match handler is called when a journey with states is activated."""
+class Test_that_journey_on_selected_is_called_when_journey_with_states_is_activated(SDKTest):
+    """Test that journey on_selected handler is called when a journey with states is activated."""
 
     async def setup(self, server: p.Server) -> None:
-        self.on_match_called = False
+        self.on_selected_called = False
         self.captured_journey_id = None
 
-        async def on_match_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
-            self.on_match_called = True
+        async def on_selected_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
+            self.on_selected_called = True
             self.captured_journey_id = match.journey_id
 
         self.agent = await server.create_agent(
             name="Journey Handler Agent",
-            description="Agent for testing journey on_match handler with states",
+            description="Agent for testing journey on_selected handler with states",
         )
 
         self.journey = await self.agent.create_journey(
             title="Stateful Journey",
             description="A journey with states",
             conditions=["Customer wants to order a pizza"],
-            on_match=on_match_handler,
+            on_selected=on_selected_handler,
         )
 
         # Add states to the journey
@@ -2023,32 +2023,32 @@ class Test_that_journey_on_match_is_called_when_journey_with_states_is_activated
             recipient=self.agent,
         )
 
-        assert self.on_match_called, "Journey on_match handler should have been called"
+        assert self.on_selected_called, "Journey on_selected handler should have been called"
         assert self.captured_journey_id == self.journey.id, (
             f"Expected journey ID {self.journey.id}, got {self.captured_journey_id}"
         )
 
 
-class Test_that_journey_on_match_is_called_when_linked_journey_is_activated(SDKTest):
-    """Test that journey on_match handler is called when a linked journey is activated."""
+class Test_that_journey_on_selected_is_called_when_linked_journey_is_activated(SDKTest):
+    """Test that journey on_selected handler is called when a linked journey is activated."""
 
     async def setup(self, server: p.Server) -> None:
-        self.parent_on_match_called = False
-        self.linked_on_match_called = False
+        self.parent_on_selected_called = False
+        self.linked_on_selected_called = False
         self.parent_journey_id = None
         self.linked_journey_id = None
 
-        async def parent_on_match_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
-            self.parent_on_match_called = True
+        async def parent_on_selected_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
+            self.parent_on_selected_called = True
             self.parent_journey_id = match.journey_id
 
-        async def linked_on_match_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
-            self.linked_on_match_called = True
+        async def linked_on_selected_handler(_ctx: p.EngineContext, match: p.JourneyMatch) -> None:
+            self.linked_on_selected_called = True
             self.linked_journey_id = match.journey_id
 
         self.agent = await server.create_agent(
             name="Linked Journey Agent",
-            description="Agent for testing linked journey on_match handlers",
+            description="Agent for testing linked journey on_selected handlers",
             composition_mode=p.CompositionMode.STRICT,
         )
 
@@ -2065,7 +2065,7 @@ class Test_that_journey_on_match_is_called_when_linked_journey_is_activated(SDKT
             title="User Validation",
             description="Validate the user",
             conditions=[],  # No conditions - activated only via link
-            on_match=linked_on_match_handler,
+            on_selected=linked_on_selected_handler,
         )
 
         # Add a state to the linked journey
@@ -2079,7 +2079,7 @@ class Test_that_journey_on_match_is_called_when_linked_journey_is_activated(SDKT
             title="Hotel Booking",
             description="Book a hotel room",
             conditions=["Customer wants to book a hotel"],
-            on_match=parent_on_match_handler,
+            on_selected=parent_on_selected_handler,
         )
 
         # First state: ask for room type
@@ -2101,8 +2101,8 @@ class Test_that_journey_on_match_is_called_when_linked_journey_is_activated(SDKT
             reuse_session=True,
         )
 
-        assert self.parent_on_match_called, (
-            "Parent journey on_match handler should have been called"
+        assert self.parent_on_selected_called, (
+            "Parent journey on_selected handler should have been called"
         )
         assert self.parent_journey_id == self.parent_journey.id, (
             f"Expected parent journey ID {self.parent_journey.id}, got {self.parent_journey_id}"
@@ -2115,8 +2115,8 @@ class Test_that_journey_on_match_is_called_when_linked_journey_is_activated(SDKT
             reuse_session=True,
         )
 
-        assert self.linked_on_match_called, (
-            "Linked journey on_match handler should have been called"
+        assert self.linked_on_selected_called, (
+            "Linked journey on_selected handler should have been called"
         )
         assert self.linked_journey_id == self.linked_journey.id, (
             f"Expected linked journey ID {self.linked_journey.id}, got {self.linked_journey_id}"

@@ -326,13 +326,13 @@ class AlphaEngine(Engine):
                 # relational resolution.
                 await self._inject_transient_guidelines(context)
 
-                # Call on_match handlers for all matched guidelines (before generating messages)
+                # Call on_selected handlers for all selected guidelines (before generating messages)
                 await self._call_guideline_handlers(
-                    context, self._hooks.on_guideline_match_handlers
+                    context, self._hooks.on_guideline_selected_handlers
                 )
 
-                # Call on_match handlers for all active journeys (before generating messages)
-                await self._call_journey_handlers(context, self._hooks.on_journey_match_handlers)
+                # Call on_selected handlers for all active journeys (before generating messages)
+                await self._call_journey_handlers(context, self._hooks.on_journey_selected_handlers)
 
                 # Update session labels from matched entities
                 await self._update_session_labels(context)

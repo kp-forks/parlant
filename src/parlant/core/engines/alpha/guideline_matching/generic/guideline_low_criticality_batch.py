@@ -91,7 +91,7 @@ class GenericLowCriticalityGuidelineMatchingBatch(GuidelineMatchingBatch):
 
                     if not inference.content.applies:
                         self._logger.warning(
-                            "Completion:\nNo applies generated! This shouldn't happen."
+                            "Completion:\nNo checks generated! This shouldn't happen."
                         )
                     else:
                         self._logger.trace(
@@ -101,10 +101,9 @@ class GenericLowCriticalityGuidelineMatchingBatch(GuidelineMatchingBatch):
                     matches = []
 
                     for id, match in inference.content.applies.items():
+                        per_item = json.dumps({"guideline_id": id, "applies": match}, indent=2)
                         if match:
-                            self._logger.debug(
-                                f"Activated:\n{inference.content.model_dump_json(indent=2)}"
-                            )
+                            self._logger.debug(f"Matched:\n{per_item}")
 
                             matches.append(
                                 GuidelineMatch(
@@ -114,9 +113,7 @@ class GenericLowCriticalityGuidelineMatchingBatch(GuidelineMatchingBatch):
                                 )
                             )
                         else:
-                            self._logger.debug(
-                                f"Skipped:\n{inference.content.model_dump_json(indent=2)}"
-                            )
+                            self._logger.debug(f"Not matched:\n{per_item}")
 
                     return GuidelineMatchingBatchResult(
                         matches=matches,

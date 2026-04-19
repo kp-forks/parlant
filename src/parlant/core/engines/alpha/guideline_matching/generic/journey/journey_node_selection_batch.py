@@ -201,6 +201,9 @@ class GenericJourneyNodeSelectionBatch(GuidelineMatchingBatch):
                     journey_path.append(guideline_id_to_node_index[current_node])
 
                 if guideline_id_to_guideline[current_node]:
+                    self._logger.debug(
+                        f"Journey '{self._examined_journey.title}': auto-advanced to node {guideline_id_to_node_index[current_node]}"
+                    )
                     return GuidelineMatchingBatchResult(
                         matches=[
                             GuidelineMatch(
@@ -216,6 +219,7 @@ class GenericJourneyNodeSelectionBatch(GuidelineMatchingBatch):
                         generation_info=EMPTY_GENERATION_INFO,
                     )
                 else:
+                    self._logger.debug(f"Journey '{self._examined_journey.title}': auto-exited")
                     return GuidelineMatchingBatchResult(
                         matches=[
                             GuidelineMatch(
@@ -235,6 +239,9 @@ class GenericJourneyNodeSelectionBatch(GuidelineMatchingBatch):
             and self._first_executable_node
             and self._get_kind(self._first_executable_node) == JourneyNodeKind.TOOL
         ):
+            self._logger.debug(
+                f"Journey '{self._examined_journey.title}': auto-advanced to node {self._get_guideline_node_index(self._first_executable_node)}"
+            )
             return GuidelineMatchingBatchResult(
                 matches=[
                     GuidelineMatch(

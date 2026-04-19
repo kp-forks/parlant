@@ -522,7 +522,7 @@ class Test_that_guideline_match_handler_is_called_when_guideline_matches(SDKTest
         self.guideline = await self.agent.create_guideline(
             condition="Customer says hello",
             action="Greet the customer warmly",
-            on_match=match_handler,
+            on_selected=match_handler,
         )
 
     async def run(self, ctx: Context) -> None:
@@ -555,7 +555,7 @@ class Test_that_multiple_match_handlers_can_be_registered_for_same_guideline(SDK
         self.guideline = await self.agent.create_guideline(
             condition="Customer asks for help",
             action="Offer assistance",
-            on_match=handler1,
+            on_selected=handler1,
         )
 
         async def shim_handler2(
@@ -569,7 +569,7 @@ class Test_that_multiple_match_handlers_can_be_registered_for_same_guideline(SDK
             )
             await handler2(core_ctx, sdk_match)
 
-        server.container[EngineHooks].on_guideline_match_handlers[self.guideline.id].append(
+        server.container[EngineHooks].on_guideline_selected_handlers[self.guideline.id].append(
             shim_handler2
         )
 
@@ -602,13 +602,13 @@ class Test_that_match_handlers_for_different_guidelines_are_independent(SDKTest)
         self.guideline1 = await self.agent.create_guideline(
             condition="Customer mentions pizza",
             action="Recommend pizza toppings",
-            on_match=handler1,
+            on_selected=handler1,
         )
 
         self.guideline2 = await self.agent.create_guideline(
             condition="Customer mentions pasta",
             action="Recommend pasta dishes",
-            on_match=handler2,
+            on_selected=handler2,
         )
 
     async def run(self, ctx: Context) -> None:
@@ -670,7 +670,7 @@ class Test_that_match_handler_on_journey_scoped_guideline_works(SDKTest):
         self.guideline = await self.journey.create_guideline(
             condition="Customer wants to order a banana",
             action="Tell them it's an excellent choice",
-            on_match=match_handler,
+            on_selected=match_handler,
         )
 
     async def run(self, ctx: Context) -> None:
@@ -761,14 +761,14 @@ class Test_that_only_prioritized_guideline_handler_is_called_when_both_match(SDK
         self.general_guideline = await self.agent.create_guideline(
             condition="Customer asks for help",
             action="Provide general help information",
-            on_match=general_handler,
+            on_selected=general_handler,
         )
 
         # Create more specific guideline that should take priority
         self.specific_guideline = await self.agent.create_guideline(
             condition="Customer asks for help with billing",
             action="Provide billing-specific help",
-            on_match=specific_handler,
+            on_selected=specific_handler,
         )
 
         # Make specific guideline prioritize over general guideline

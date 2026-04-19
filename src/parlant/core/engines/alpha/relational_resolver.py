@@ -440,8 +440,8 @@ class RelationalResolver:
                 filtered_matches.append(match)
             else:
                 self._logger.debug(
-                    f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
-                    f"filtered due to lower priority ({priority} < {max_priority})"
+                    f"Dropped (lower priority): Guideline {match.guideline.id} "
+                    f"({match.guideline.content.action}) — {priority} < {max_priority}"
                 )
                 resolutions.setdefault(match.guideline.id, []).append(
                     Resolution(
@@ -608,9 +608,7 @@ class RelationalResolver:
 
             if failed:
                 surviving.discard(gid)
-                self._logger.debug(
-                    f"Skipped: Guideline {gid} deactivated due to unmet dependencies"
-                )
+                self._logger.debug(f"Dropped (unmet dependency): Guideline {gid}")
 
         return [m for m in matches if m.guideline.id in surviving]
 
@@ -1152,8 +1150,8 @@ class RelationalResolver:
 
             if depends_on_deprioritized:
                 self._logger.debug(
-                    f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
-                    f"deactivated due to dependency on deprioritized entity"
+                    f"Dropped (dependency on dropped entity): Guideline {match.guideline.id} "
+                    f"({match.guideline.content.action})"
                 )
                 # Find the specific deprioritized dependency for the resolution
                 deprioritized_dep_ids: list[ResolvedEntityId | TagId] = []
@@ -1206,15 +1204,15 @@ class RelationalResolver:
                 m.guideline for m in all_matches if m.guideline.id == prioritized_guideline_id
             )
             self._logger.debug(
-                f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
-                f"deactivated due to contextual prioritization by "
+                f"Dropped (deprioritized by guideline): Guideline {match.guideline.id} "
+                f"({match.guideline.content.action}) — by "
                 f"{prioritized_guideline_id} ({prioritized.content.action})"
             )
         elif prioritized_journey_id:
             deprioritized_journeys.add(prioritized_journey_id)
             self._logger.debug(
-                f"Skipped: Guideline {match.guideline.id} ({match.guideline.content.action}) "
-                f"deactivated due to contextual prioritization by journey "
+                f"Dropped (deprioritized by journey): Guideline {match.guideline.id} "
+                f"({match.guideline.content.action}) — by journey "
                 f"{prioritized_journey_id}"
             )
 
