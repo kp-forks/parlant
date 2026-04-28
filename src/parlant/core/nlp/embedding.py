@@ -26,8 +26,10 @@ from typing_extensions import override
 
 from parlant.core.async_utils import Stopwatch
 from parlant.core.common import Version
+from parlant.core.health_reporter import HealthReporter
 from parlant.core.loggers import Logger
 from parlant.core.meter import DurationHistogram, Meter
+from parlant.core.nlp.health import NLP_EMBED_KIND
 from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.persistence.common import ObjectId
 from parlant.core.persistence.document_database import (
@@ -87,8 +89,23 @@ class Embedder(ABC):
 _EMBED_DURATION_HISTOGRAM: DurationHistogram | None = None
 
 
+_SHARED_HEALTH_REPORTER: HealthReporter | None = None
+
+
+def set_shared_health_reporter(reporter: HealthReporter | None) -> None:
+    """Install the process-wide HealthReporter for ``BaseEmbedder`` instances."""
+    global _SHARED_HEALTH_REPORTER
+    _SHARED_HEALTH_REPORTER = reporter
+
+
 class BaseEmbedder(Embedder):
-    def __init__(self, logger: Logger, tracer: Tracer, meter: Meter, model_name: str) -> None:
+    def __init__(
+        self,
+        logger: Logger,
+        tracer: Tracer,
+        meter: Meter,
+        model_name: str,
+    ) -> None:
         self.logger = logger
         self.tracer = tracer
         self.meter = meter
@@ -217,7 +234,7 @@ class BaseEmbedder(Embedder):
                     [text for _, text in texts_to_embed],
                     hints,
                 )
-            except Exception:
+            except Exception as exc:
                 self.tracer.add_event(
                     "embed.request_failed",
                     attributes={
@@ -226,6 +243,7 @@ class BaseEmbedder(Embedder):
                         "duration": start.elapsed,
                     },
                 )
+                self._report_health(start.elapsed, success=False, error=exc)
                 raise
             else:
                 self.tracer.add_event(
@@ -236,6 +254,7 @@ class BaseEmbedder(Embedder):
                         "duration": start.elapsed,
                     },
                 )
+                self._report_health(start.elapsed, success=True, error=None)
 
             # Cache new results and merge with cached results
             for (orig_idx, text), vector in zip(texts_to_embed, result.vectors):
@@ -244,6 +263,30 @@ class BaseEmbedder(Embedder):
 
         # Reconstruct results in original order
         return EmbeddingResult(vectors=[cached_results[i] for i in range(len(texts))])
+
+    def _report_health(
+        self,
+        duration_seconds: float,
+        *,
+        success: bool,
+        error: BaseException | None,
+    ) -> None:
+        reporter = _SHARED_HEALTH_REPORTER
+        if reporter is None:
+            return
+        try:
+            reporter.report(
+                NLP_EMBED_KIND,
+                {
+                    "schema": self.__class__.__qualname__,
+                    "model": self.model_name,
+                    "success": success,
+                    "latency_ms": duration_seconds * 1000.0,
+                    "error_class": type(error).__name__ if error is not None else None,
+                },
+            )
+        except Exception:
+            self.logger.debug("Failed to report NLP health for embed request")
 
 
 class EmbedderFactory:

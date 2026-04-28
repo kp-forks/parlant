@@ -295,3 +295,52 @@ class Test_that_healthz_reports_healthy_after_well_behaved_tool(SDKTest):
                 f"Expected healthy after well-behaved tool, got {data}"
             )
             assert data["checks"]["event_loop"]["latency_ms"] < 200
+
+
+class Test_that_healthz_nlp_section_starts_empty_before_any_message(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        pass
+
+    async def run(self, ctx: Context) -> None:
+        async with httpx.AsyncClient() as client:
+            health_response = await client.get(f"http://localhost:{ctx.server.port}/healthz")
+            assert health_response.status_code == 200
+
+            data = health_response.json()
+            assert "nlp" in data["checks"], f"Expected nlp section in /healthz, got {data}"
+            assert data["checks"]["nlp"]["status"] == "healthy"
+            assert data["checks"]["nlp"]["sample_count"] == 0
+
+
+class Test_that_healthz_reports_nlp_section_after_message_exchange(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="NLP Health Agent",
+            description="Agent for testing NLP health reporting",
+        )
+
+    async def run(self, ctx: Context) -> None:
+        response = await ctx.send_and_receive_message(
+            customer_message="Hello, how are you?",
+            recipient=self.agent,
+        )
+        assert len(response) > 0
+
+        async with httpx.AsyncClient() as client:
+            health_response = await client.get(f"http://localhost:{ctx.server.port}/healthz")
+            assert health_response.status_code == 200
+
+            data = health_response.json()
+            assert "nlp" in data["checks"], f"Expected nlp section in /healthz, got {data}"
+
+            nlp_section = data["checks"]["nlp"]
+            assert nlp_section["sample_count"] > 0, (
+                f"Expected nlp.sample_count > 0 after a message exchange, got {nlp_section}"
+            )
+            assert nlp_section["status"] == "healthy", (
+                f"Expected nlp.status healthy after a successful exchange, got {nlp_section}"
+            )
+            assert isinstance(nlp_section.get("schemas"), dict)
+            assert len(nlp_section["schemas"]) > 0, (
+                f"Expected at least one schema in nlp.schemas, got {nlp_section}"
+            )

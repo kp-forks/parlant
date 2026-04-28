@@ -6,6 +6,10 @@ All notable changes to Parlant will be documented here.
 
 ### Added
 
+- Add `HealthReporter` (`parlant.core.health_reporter`) — a generic, per-process health-reporting service registered in the container. Subsystems call `report(kind, attributes)`; registered `HealthView` objects interpret reports per kind and contribute to the `/healthz` snapshot. Each kind has a configurable retention policy (`window` + `max_count`). Views declare `Criticality.CRITICAL` or `INFORMATIONAL`; only critical views feed the worst-of overall status rollup
+- Add `NLPHealthView` reporting NLP request health sliced by schema (success rate, p50/p95 latency, recent error breakdown) with configurable thresholds for `degraded`/`unhealthy` classification
+- Instrument `BaseSchematicGenerator.generate()` and `BaseEmbedder.embed()` to emit `nlp.request` / `nlp.embed` health reports on success and failure, providing dashboard visibility into LLM and embedding behavior across all adapters
+- Wrap the existing event-loop check as `EventLoopHealthView` so `/healthz` rollup is uniform across all health views
 - Add per-decision debug logs to journey node selection (`Journey '<title>': advanced/stayed/exited/completed/backtracked/auto-advanced/...`) so journey progression is visible at debug level alongside guideline matching
 - Add a warning log for invalid condition ids returned during journey next-step selection
 

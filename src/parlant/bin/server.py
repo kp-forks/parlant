@@ -18,6 +18,7 @@ import asyncio
 from contextlib import asynccontextmanager, AsyncExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import timedelta
 import importlib
 import inspect
 import os
@@ -124,7 +125,16 @@ from parlant.core.engines.alpha.perceived_performance_policy import (
 )
 from parlant.core.engines.alpha.planners import NullPlanner, PlannerProvider
 from parlant.core.engines.alpha.relational_resolver import RelationalResolver
+from parlant.core.event_loop_health_view import EventLoopHealthView
 from parlant.core.event_loop_monitor import EventLoopMonitor
+from parlant.core.health_reporter import HealthReporter, ReportRetention
+from parlant.core.nlp.embedding import (
+    set_shared_health_reporter as _embedding_set_shared_health_reporter,
+)
+from parlant.core.nlp.generation import (
+    set_shared_health_reporter as _generation_set_shared_health_reporter,
+)
+from parlant.core.nlp.health import NLP_EMBED_KIND, NLP_REQUEST_KIND, NLPHealthView
 from parlant.core.engines.alpha.tool_calling.overlapping_tools_batch import (
     OverlappingToolsBatchSchema,
 )
@@ -672,6 +682,21 @@ async def setup_container() -> AsyncIterator[Container]:
     _define_singleton(c, Engine, AlphaEngine)
 
     c[EventLoopMonitor] = EventLoopMonitor()
+
+    health_reporter = HealthReporter()
+    health_reporter.configure_retention(
+        NLP_REQUEST_KIND,
+        ReportRetention(window=timedelta(minutes=10), max_count=10_000),
+    )
+    health_reporter.configure_retention(
+        NLP_EMBED_KIND,
+        ReportRetention(window=timedelta(minutes=10), max_count=10_000),
+    )
+    health_reporter.register_view(NLPHealthView())
+    health_reporter.register_view(EventLoopHealthView(c[EventLoopMonitor]))
+    c[HealthReporter] = health_reporter
+    _generation_set_shared_health_reporter(health_reporter)
+    _embedding_set_shared_health_reporter(health_reporter)
 
     _define_singleton(c, Application, Application)
 

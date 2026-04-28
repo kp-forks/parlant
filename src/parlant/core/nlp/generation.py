@@ -21,9 +21,11 @@ from typing_extensions import override
 from parlant.core.async_utils import Stopwatch
 from parlant.core.common import DefaultBaseModel
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.health_reporter import HealthReporter
 from parlant.core.loggers import Logger
 from parlant.core.meter import DurationHistogram, Meter
 from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
+from parlant.core.nlp.health import NLP_REQUEST_KIND
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.tracer import Tracer
 
@@ -254,8 +256,24 @@ class SchematicGenerator(ABC, Generic[T]):
 _REQUEST_DURATION_HISTOGRAM: DurationHistogram | None = None
 
 
+_SHARED_HEALTH_REPORTER: HealthReporter | None = None
+
+
+def set_shared_health_reporter(reporter: HealthReporter | None) -> None:
+    """Install the process-wide HealthReporter that ``BaseSchematicGenerator``
+    instances will report to. Called once during server startup."""
+    global _SHARED_HEALTH_REPORTER
+    _SHARED_HEALTH_REPORTER = reporter
+
+
 class BaseSchematicGenerator(SchematicGenerator[T]):
-    def __init__(self, logger: Logger, tracer: Tracer, meter: Meter, model_name: str) -> None:
+    def __init__(
+        self,
+        logger: Logger,
+        tracer: Tracer,
+        meter: Meter,
+        model_name: str,
+    ) -> None:
         self.logger = logger
         self.tracer = tracer
         self.meter = meter
@@ -294,7 +312,7 @@ class BaseSchematicGenerator(SchematicGenerator[T]):
 
             try:
                 result = await self.do_generate(prompt, hints)
-            except Exception:
+            except Exception as exc:
                 self.tracer.add_event(
                     "gen.request_failed",
                     attributes={
@@ -303,6 +321,7 @@ class BaseSchematicGenerator(SchematicGenerator[T]):
                         "duration": start.elapsed,
                     },
                 )
+                self._report_health(start.elapsed, success=False, error=exc)
                 raise
             else:
                 self.tracer.add_event(
@@ -313,8 +332,33 @@ class BaseSchematicGenerator(SchematicGenerator[T]):
                         "duration": start.elapsed,
                     },
                 )
+                self._report_health(start.elapsed, success=True, error=None)
 
             return result
+
+    def _report_health(
+        self,
+        duration_seconds: float,
+        *,
+        success: bool,
+        error: BaseException | None,
+    ) -> None:
+        reporter = _SHARED_HEALTH_REPORTER
+        if reporter is None:
+            return
+        try:
+            reporter.report(
+                NLP_REQUEST_KIND,
+                {
+                    "schema": self.schema.__name__,
+                    "model": self.model_name,
+                    "success": success,
+                    "latency_ms": duration_seconds * 1000.0,
+                    "error_class": type(error).__name__ if error is not None else None,
+                },
+            )
+        except Exception:
+            self.logger.debug("Failed to report NLP health for generation request")
 
 
 class FallbackSchematicGenerator(SchematicGenerator[T]):
