@@ -14,6 +14,7 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 import os
 import time
 from typing import Callable, cast
@@ -251,6 +252,9 @@ class SDKTest:
             nonlocal test_container
             test_container = container.clone()
             test_container[PerceivedPerformancePolicy] = NullPerceivedPerformancePolicy()
+            # Tests need to observe newly reported health data immediately rather
+            # than waiting for the production cache TTL to elapse.
+            test_container[HealthReporter]._snapshot_cache_ttl = timedelta(0)
             return test_container
 
         return p.Server(
