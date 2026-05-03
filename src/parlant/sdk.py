@@ -4786,9 +4786,20 @@ class Server:
             with applying_progress:
                 bar = applying_progress.add_task("Applying evaluations", total=total_results)
 
+                # For UX: Stretch the bar to ~1s total so it's visible even when
+                # processing is fast; pure no-op once natural work exceeds it.
+                per_item_budget = 1.0 / total_results
+
                 for i, (entity_type, entity_id, result) in enumerate(evaluation_results):
+                    item_started = asyncio.get_running_loop().time()
                     await self._apply_single_evaluation(entity_type, entity_id, result)
+                    item_ended = asyncio.get_running_loop().time()
+
                     applying_progress.update(bar, completed=i + 1)
+
+                    # If processing was very fast, wait a bit to meet the allotted budget
+                    if (remaining := per_item_budget - (item_ended - item_started)) > 0:
+                        await asyncio.sleep(remaining)
 
     async def _process_indexing(self) -> None:
         indexer = self._container[Indexer]
