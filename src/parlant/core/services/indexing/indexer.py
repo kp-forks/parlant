@@ -18,7 +18,8 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
+from typing_extensions import override
 
 from parlant.core.agents import AgentStore
 from parlant.core.canned_responses import CannedResponseStore
@@ -66,9 +67,13 @@ class Indexer(ABC):
     async def index(
         self,
         payload: Mapping[str, Mapping[str, IndexRequest]],
-    ) -> ProgressReport: ...
+        progress_report: ProgressReport,
+    ) -> None: ...
 
-    async def run(self) -> ProgressReport:
+    async def run(
+        self,
+        progress_callback: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
         payload: dict[str, dict[str, IndexRequest]] = {
             "agents": {},
             "guidelines": {},
@@ -120,7 +125,12 @@ class Indexer(ABC):
                     id_override=tool_id,
                 )
 
-        return await self.index(payload)
+        async def _noop(_: float) -> None:
+            return None
+
+        progress_report = ProgressReport(progress_callback or _noop)
+        await progress_report.stretch(sum(len(bucket) for bucket in payload.values()))
+        await self.index(payload, progress_report)
 
     def _build_request(
         self,
@@ -158,6 +168,18 @@ class Indexer(ABC):
         existing = getattr(entity, "checksum", None)
         checksum = existing if isinstance(existing, str) else xxh3_checksum(repr(data))
         return data, checksum
+
+
+class NullIndexer(Indexer):
+    @override
+    async def index(
+        self,
+        payload: Mapping[str, Mapping[str, IndexRequest]],
+        progress_report: ProgressReport,
+    ) -> None:
+        total = sum(len(bucket) for bucket in payload.values())
+        if total > 0:
+            await progress_report.increment(total)
 
 
 def _to_jsonable(value: Any) -> JSONSerializable:

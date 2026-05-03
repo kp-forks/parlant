@@ -13,12 +13,23 @@
 # limitations under the License.
 
 import time
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Mapping
 from fastapi import FastAPI, Request, Response
 import httpx
 import pytest
+from typing_extensions import override
 
 import parlant.sdk as p
+from parlant.core.agents import AgentStore
+from parlant.core.canned_responses import CannedResponseStore
+from parlant.core.context_variables import ContextVariableStore
+from parlant.core.glossary import GlossaryStore
+from parlant.core.guidelines import GuidelineStore
+from parlant.core.journeys import JourneyStore
+from parlant.core.relationships import RelationshipStore
+from parlant.core.services.indexing.common import ProgressReport
+from parlant.core.services.indexing.indexer import IndexRequest, Indexer
+from parlant.core.services.tools.service_registry import ServiceRegistry
 
 from tests.sdk.utils import Context, SDKTest
 from tests.test_utilities import get_random_port
@@ -221,6 +232,79 @@ class Test_that_server_works_without_configure_api(SDKTest):
             assert data["status"] in ("healthy", "degraded", "unhealthy")
 
 
+class Test_that_indexer_runs_during_server_startup_with_full_payload(SDKTest):
+    captured_payload: Mapping[str, Mapping[str, IndexRequest]] | None = None
+    call_count: int = 0
+
+    async def create_server(self, port: int) -> tuple[p.Server, Callable[[], p.Container]]:
+        test_container: p.Container = p.Container()
+
+        outer = self
+
+        class _RecordingIndexer(Indexer):
+            @override
+            async def index(
+                self,
+                payload: Mapping[str, Mapping[str, IndexRequest]],
+                progress_report: ProgressReport,
+            ) -> None:
+                outer.captured_payload = payload
+                outer.call_count += 1
+                total = sum(len(bucket) for bucket in payload.values())
+                if total > 0:
+                    await progress_report.increment(total)
+
+        async def configure_container(container: p.Container) -> p.Container:
+            nonlocal test_container
+            test_container = container.clone()
+            test_container[Indexer] = _RecordingIndexer(
+                agent_store=test_container[AgentStore],
+                guideline_store=test_container[GuidelineStore],
+                journey_store=test_container[JourneyStore],
+                relationship_store=test_container[RelationshipStore],
+                glossary_store=test_container[GlossaryStore],
+                context_variable_store=test_container[ContextVariableStore],
+                canned_response_store=test_container[CannedResponseStore],
+                service_registry=test_container[ServiceRegistry],
+            )
+            return test_container
+
+        return p.Server(
+            port=port,
+            tool_service_port=get_random_port(),
+            log_level=p.LogLevel.TRACE,
+            configure_container=configure_container,
+        ), lambda: test_container
+
+    async def setup(self, server: p.Server) -> None:
+        agent = await server.create_agent(
+            name="Indexed Agent",
+            description="An agent for the indexer test",
+        )
+        await agent.create_guideline(
+            condition="customer says hi",
+            action="reply with a greeting",
+        )
+
+    async def run(self, ctx: Context) -> None:
+        assert self.call_count == 1
+        assert self.captured_payload is not None
+
+        payload = self.captured_payload
+        assert {
+            "agents",
+            "guidelines",
+            "journeys",
+            "relationships",
+            "glossary",
+            "context_variables",
+            "canned_responses",
+            "tools",
+        }.issubset(payload.keys())
+        assert len(payload["agents"]) == 1
+        assert len(payload["guidelines"]) >= 1
+
+
 class Test_that_healthz_detects_event_loop_blocking_from_synchronous_tool(SDKTest):
     async def setup(self, server: p.Server) -> None:
 
@@ -400,22 +484,16 @@ class Test_that_healthz_reports_engine_section_after_message_exchange(SDKTest):
             assert health_response.status_code == 200
 
             data = health_response.json()
-            assert "engine" in data["checks"], (
-                f"Expected 'engine' section in /healthz, got {data}"
-            )
+            assert "engine" in data["checks"], f"Expected 'engine' section in /healthz, got {data}"
 
             engine = data["checks"]["engine"]
-            assert engine["sample_count"] > 0, (
-                f"Expected positive sample_count, got {engine}"
-            )
+            assert engine["sample_count"] > 0, f"Expected positive sample_count, got {engine}"
             assert engine["success_rate"] == 1.0, (
                 f"Expected success_rate 1.0 after a clean turn, got {engine}"
             )
             for field in ("p50_latency_ms", "p95_latency_ms", "p50_ttfm_ms", "p95_ttfm_ms"):
                 assert field in engine, f"Expected '{field}' in engine section, got {engine}"
-                assert engine[field] > 0, (
-                    f"Expected positive {field} after a turn, got {engine}"
-                )
+                assert engine[field] > 0, f"Expected positive {field} after a turn, got {engine}"
 
             assert "turns_per_minute" in engine, (
                 f"Expected 'turns_per_minute' in engine section, got {engine}"

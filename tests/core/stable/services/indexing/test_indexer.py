@@ -66,13 +66,9 @@ class _CapturingIndexer(Indexer):
     async def index(
         self,
         payload: Mapping[str, Mapping[str, IndexRequest]],
-    ) -> ProgressReport:
+        progress_report: ProgressReport,
+    ) -> None:
         self.captured_payload = payload
-
-        async def _noop(_: float) -> None:
-            return None
-
-        return ProgressReport(_noop)
 
 
 def _make_indexer(container: Container) -> _CapturingIndexer:
@@ -130,6 +126,72 @@ async def test_that_indexer_run_walks_all_stores_and_yields_one_request_per_enti
     assert variable.id in payload["context_variables"]
     assert canned.id in payload["canned_responses"]
     assert relationship.id in payload["relationships"]
+
+
+async def test_that_run_invokes_progress_callback_and_reaches_one_hundred_percent(
+    container: Container,
+) -> None:
+    await container[AgentStore].create_agent(name="Agent", description=None)
+
+    class _CountingIndexer(Indexer):
+        async def index(
+            self,
+            payload: Mapping[str, Mapping[str, IndexRequest]],
+            progress_report: ProgressReport,
+        ) -> None:
+            for bucket in payload.values():
+                for _ in bucket:
+                    await progress_report.increment()
+
+    indexer = _CountingIndexer(
+        agent_store=container[AgentStore],
+        guideline_store=container[GuidelineStore],
+        journey_store=container[JourneyStore],
+        relationship_store=container[RelationshipStore],
+        glossary_store=container[GlossaryStore],
+        context_variable_store=container[ContextVariableStore],
+        canned_response_store=container[CannedResponseStore],
+        service_registry=container[ServiceRegistry],
+    )
+
+    captured: list[float] = []
+
+    async def callback(pct: float) -> None:
+        captured.append(pct)
+
+    await indexer.run(progress_callback=callback)
+
+    assert captured, "progress callback was never invoked"
+    assert captured[-1] == 100.0
+
+
+async def test_that_null_indexer_advances_progress_to_full(
+    container: Container,
+) -> None:
+    from parlant.core.services.indexing.indexer import NullIndexer
+
+    await container[AgentStore].create_agent(name="Agent", description=None)
+    await container[GuidelineStore].create_guideline(condition="c", action="a")
+
+    captured: list[float] = []
+
+    async def callback(pct: float) -> None:
+        captured.append(pct)
+
+    indexer = NullIndexer(
+        agent_store=container[AgentStore],
+        guideline_store=container[GuidelineStore],
+        journey_store=container[JourneyStore],
+        relationship_store=container[RelationshipStore],
+        glossary_store=container[GlossaryStore],
+        context_variable_store=container[ContextVariableStore],
+        canned_response_store=container[CannedResponseStore],
+        service_registry=container[ServiceRegistry],
+    )
+
+    await indexer.run(progress_callback=callback)
+
+    assert captured[-1] == 100.0
 
 
 async def test_that_payload_is_keyed_by_category_then_entity_id(

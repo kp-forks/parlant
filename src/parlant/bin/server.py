@@ -242,6 +242,7 @@ from parlant.core.engines.alpha.message_generator import (
 from parlant.core.engines.alpha.tool_event_generator import ToolEventGenerator
 from parlant.core.engines.types import Engine
 from parlant.core.services.indexing.behavioral_change_evaluation import BehavioralChangeEvaluator
+from parlant.core.services.indexing.indexer import Indexer, NullIndexer
 from parlant.core.loggers import CompositeLogger, FileLogger, LogLevel, Logger
 from parlant.core.application import Application
 from parlant.core.version import VERSION
@@ -633,6 +634,7 @@ async def setup_container() -> AsyncIterator[Container]:
 
     _define_singleton(c, BehavioralChangeEvaluator, BehavioralChangeEvaluator)
     _define_singleton(c, EvaluationListener, PollingEvaluationListener)
+    _define_singleton(c, Indexer, NullIndexer)
 
     _define_singleton(c, ResponseAnalysisBatch, GenericResponseAnalysisBatch)
     _define_singleton(c, ObservationalGuidelineMatching, ObservationalGuidelineMatching)
