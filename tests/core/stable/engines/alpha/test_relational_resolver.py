@@ -20,6 +20,7 @@ from parlant.core.engines.alpha.relational_resolver import (
     RelationalResolverResult,
     Resolution,
     ResolutionKind,
+    ResolvedEntity,
     ResolvedEntityId,
 )
 from parlant.core.journey_guideline_projection import JourneyGuidelineProjection
@@ -30,33 +31,56 @@ from parlant.core.relationships import (
     RelationshipEntity,
     RelationshipStore,
 )
-from parlant.core.guidelines import GuidelineStore
+from parlant.core.guidelines import Guideline, GuidelineId, GuidelineStore
+from parlant.core.journeys import Journey, JourneyId
 from parlant.core.tags import TagStore, Tag
+
+
+def _find_resolutions(
+    result: RelationalResolverResult,
+    target: Guideline | Journey | ResolvedEntity | GuidelineId | JourneyId,
+) -> list[Resolution]:
+    """Look up resolutions for a guideline/journey, accepting full objects,
+    ResolvedEntity wrappers, or bare ids (legacy)."""
+    if isinstance(target, ResolvedEntity):
+        return result.resolutions.get(target, [])
+    if isinstance(target, Guideline):
+        return result.resolutions.get(ResolvedEntity.guideline(target), [])
+    if isinstance(target, Journey):
+        return result.resolutions.get(ResolvedEntity.journey(target), [])
+    # Bare id: scan the dict for a matching entity id.
+    for entity, res in result.resolutions.items():
+        if entity.entity.id == target:
+            return res
+    return []
 
 
 def assert_resolutions(
     result: RelationalResolverResult,
-    entity_id: ResolvedEntityId,
+    entity: Guideline | Journey | ResolvedEntity | GuidelineId | JourneyId,
     expected_kinds: list[ResolutionKind],
 ) -> None:
     """Assert that an entity has exactly the given resolution kinds."""
-    resolutions = result.resolutions.get(entity_id, [])
+    resolutions = _find_resolutions(result, entity)
     actual_kinds = [r.kind for r in resolutions]
+    label = (
+        entity.entity.id if isinstance(entity, ResolvedEntity) else getattr(entity, "id", entity)
+    )
     assert sorted(actual_kinds, key=lambda k: k.name) == sorted(
         expected_kinds, key=lambda k: k.name
     ), (
-        f"Entity {entity_id}: expected resolution kinds {[k.name for k in expected_kinds]}, "
-        f"got {[k.name for k in actual_kinds]}"
+        f"Entity {label}: expected resolution kinds "
+        f"{[k.name for k in expected_kinds]}, got {[k.name for k in actual_kinds]}"
     )
 
 
 def get_resolutions_by_kind(
     result: RelationalResolverResult,
-    entity_id: ResolvedEntityId,
+    entity: Guideline | Journey | ResolvedEntity | GuidelineId | JourneyId,
     kind: ResolutionKind,
 ) -> list[Resolution]:
     """Get all resolutions of a specific kind for an entity."""
-    return [r for r in result.resolutions.get(entity_id, []) if r.kind == kind]
+    return [r for r in _find_resolutions(result, entity) if r.kind == kind]
 
 
 async def test_that_relational_resolver_prioritizes_indirectly_between_guidelines(
@@ -70,7 +94,7 @@ async def test_that_relational_resolver_prioritizes_indirectly_between_guideline
     g2 = await guideline_store.create_guideline(condition="y", action="z")
     g3 = await guideline_store.create_guideline(condition="z", action="t")
 
-    await relationship_store.create_relationship(
+    rel_g1_g2 = await relationship_store.create_relationship(
         source=RelationshipEntity(
             id=g1.id,
             kind=RelationshipEntityKind.GUIDELINE,
@@ -82,7 +106,7 @@ async def test_that_relational_resolver_prioritizes_indirectly_between_guideline
         kind=RelationshipKind.PRIORITY,
     )
 
-    await relationship_store.create_relationship(
+    rel_g2_g3 = await relationship_store.create_relationship(
         source=RelationshipEntity(
             id=g2.id,
             kind=RelationshipEntityKind.GUIDELINE,
@@ -109,6 +133,21 @@ async def test_that_relational_resolver_prioritizes_indirectly_between_guideline
     assert_resolutions(result, g1.id, [ResolutionKind.NONE])
     assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
     assert_resolutions(result, g3.id, [ResolutionKind.DEPRIORITIZED])
+
+    # Each DEPRIORITIZED resolution should identify the prioritizing
+    # guideline as a counterpart and reference the PRIORITY relationship
+    # that caused the deprioritization.
+    g2_res = get_resolutions_by_kind(result, g2.id, ResolutionKind.DEPRIORITIZED)
+    assert len(g2_res) == 1
+    assert ResolvedEntity.guideline(g1) in g2_res[0].details.counterparts
+    assert g2_res[0].details.relationship is not None
+    assert g2_res[0].details.relationship.id == rel_g1_g2.id
+
+    g3_res = get_resolutions_by_kind(result, g3.id, ResolutionKind.DEPRIORITIZED)
+    assert len(g3_res) == 1
+    assert ResolvedEntity.guideline(g2) in g3_res[0].details.counterparts
+    assert g3_res[0].details.relationship is not None
+    assert g3_res[0].details.relationship.id == rel_g2_g3.id
 
 
 async def test_that_relational_resolver_prioritizes_between_journey_nodes(
@@ -142,7 +181,7 @@ async def test_that_relational_resolver_prioritizes_between_journey_nodes(
     j1_guidelines = await container[JourneyGuidelineProjection].project_journey_to_guidelines(j1.id)
     j2_guidelines = await container[JourneyGuidelineProjection].project_journey_to_guidelines(j2.id)
 
-    await relationship_store.create_relationship(
+    journey_priority_rel = await relationship_store.create_relationship(
         source=RelationshipEntity(
             id=Tag.for_journey_id(j1.id).id,
             kind=RelationshipEntityKind.TAG_ALL,
@@ -170,6 +209,15 @@ async def test_that_relational_resolver_prioritizes_between_journey_nodes(
 
     assert_resolutions(result, j1_guidelines[0].id, [ResolutionKind.NONE])
     assert_resolutions(result, j2_guidelines[0].id, [ResolutionKind.DEPRIORITIZED])
+
+    # The deprioritized journey-node guideline's resolution should identify
+    # the prioritizing journey as a counterpart and reference the PRIORITY
+    # relationship between the journey tags.
+    j2g_res = get_resolutions_by_kind(result, j2_guidelines[0].id, ResolutionKind.DEPRIORITIZED)
+    assert len(j2g_res) == 1
+    assert ResolvedEntity.journey(j1) in j2g_res[0].details.counterparts
+    assert j2g_res[0].details.relationship is not None
+    assert j2g_res[0].details.relationship.id == journey_priority_rel.id
 
 
 async def test_that_relational_resolver_prioritizes_guideline_over_journey(
@@ -3216,7 +3264,7 @@ async def test_that_condition_guideline_survives_when_its_journey_is_deprioritiz
     assert_resolutions(result, g1.id, [ResolutionKind.NONE])
     assert_resolutions(result, j1_node.id, [ResolutionKind.DEPRIORITIZED])
     deprioritized = get_resolutions_by_kind(result, j1_node.id, ResolutionKind.DEPRIORITIZED)
-    assert any(g1.id in r.details.target_ids for r in deprioritized)
+    assert any(ResolvedEntity.guideline(g1) in r.details.counterparts for r in deprioritized)
 
 
 async def test_that_tag_priority_does_not_deprioritize_when_no_source_tag_member_is_matched(
@@ -3366,7 +3414,7 @@ async def test_that_tag_priority_transitively_filters_guideline_depending_on_dep
     assert_resolutions(result, g1_1.id, [ResolutionKind.NONE])
     assert_resolutions(result, g2_1.id, [ResolutionKind.DEPRIORITIZED])
     deprioritized = get_resolutions_by_kind(result, g2_1.id, ResolutionKind.DEPRIORITIZED)
-    assert any(g1_1.id in r.details.target_ids for r in deprioritized)
+    assert any(ResolvedEntity.guideline(g1_1) in r.details.counterparts for r in deprioritized)
     assert_resolutions(result, g3.id, [ResolutionKind.DEPRIORITIZED])
 
 
@@ -3426,7 +3474,7 @@ async def test_that_custom_tagged_journey_deprioritizes_guidelines_with_lower_pr
     assert_resolutions(result, j1_node.id, [ResolutionKind.NONE])
     assert_resolutions(result, g1.id, [ResolutionKind.DEPRIORITIZED])
     deprioritized = get_resolutions_by_kind(result, g1.id, ResolutionKind.DEPRIORITIZED)
-    assert any(j1_node.id in r.details.target_ids for r in deprioritized)
+    assert any(ResolvedEntity.guideline(j1_node) in r.details.counterparts for r in deprioritized)
 
 
 async def test_that_higher_priority_tag_deprioritizes_journey_with_matching_custom_tag(
@@ -3482,7 +3530,7 @@ async def test_that_higher_priority_tag_deprioritizes_journey_with_matching_cust
     assert_resolutions(result, g1.id, [ResolutionKind.NONE])
     assert_resolutions(result, j1_node.id, [ResolutionKind.DEPRIORITIZED])
     deprioritized = get_resolutions_by_kind(result, j1_node.id, ResolutionKind.DEPRIORITIZED)
-    assert any(g1.id in r.details.target_ids for r in deprioritized)
+    assert any(ResolvedEntity.guideline(g1) in r.details.counterparts for r in deprioritized)
 
 
 async def test_that_custom_tagged_journey_dependency_deactivates_node_guidelines_when_target_tag_not_met(
@@ -4093,7 +4141,7 @@ async def test_that_multiple_independent_dependencies_must_all_be_met(
     )
 
     # G1 depends on T1
-    await relationship_store.create_relationship(
+    rel_t1 = await relationship_store.create_relationship(
         source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
         target=RelationshipEntity(id=t1.id, kind=RelationshipEntityKind.TAG_ALL),
         kind=RelationshipKind.DEPENDENCY,
@@ -4117,9 +4165,12 @@ async def test_that_multiple_independent_dependencies_must_all_be_met(
     assert_resolutions(result, g2.id, [ResolutionKind.NONE])
 
     # The single resolution should specifically identify T1 as the unmet target
+    # and reference the dependency relationship that caused the failure.
     g1_res = get_resolutions_by_kind(result, g1.id, ResolutionKind.UNMET_DEPENDENCY_ALL)
     assert len(g1_res) == 1
-    assert t1.id in g1_res[0].details.target_ids
+    assert ResolvedEntity.tag(t1) in g1_res[0].details.counterparts
+    assert g1_res[0].details.relationship is not None
+    assert g1_res[0].details.relationship.id == rel_t1.id
 
 
 async def test_that_multiple_independent_dependencies_survive_when_all_met(
@@ -4286,6 +4337,17 @@ async def test_that_numerical_priority_filtering_removes_dependent_when_dependen
     assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
     assert_resolutions(result, g2.id, [ResolutionKind.DEPRIORITIZED])
     assert_resolutions(result, g3.id, [ResolutionKind.NONE])
+
+    # G2's numerical-priority deprioritization should list the entities at
+    # the max priority (G1 and G3) as counterparts. Numerical priority is
+    # not a relationship, so relationship stays None.
+    g2_res = get_resolutions_by_kind(result, g2.id, ResolutionKind.DEPRIORITIZED)
+    assert len(g2_res) == 1
+    assert set(g2_res[0].details.counterparts) == {
+        ResolvedEntity.guideline(g1),
+        ResolvedEntity.guideline(g3),
+    }
+    assert g2_res[0].details.relationship is None
 
 
 async def test_that_numerical_priority_filtering_keeps_dependent_when_dependency_shares_highest_priority(
@@ -4768,13 +4830,15 @@ async def test_that_dependency_any_group_filters_when_no_target_is_matched(
     g3 = await guideline_store.create_guideline(condition="c", action="g3 action")
 
     group_id = "test-group-1"
+    group_rel_ids = []
     for target in [g2, g3]:
-        await relationship_store.create_relationship(
+        rel = await relationship_store.create_relationship(
             source=RelationshipEntity(id=g1.id, kind=RelationshipEntityKind.GUIDELINE),
             target=RelationshipEntity(id=target.id, kind=RelationshipEntityKind.GUIDELINE),
             kind=RelationshipKind.DEPENDENCY_ANY,
             group_id=group_id,
         )
+        group_rel_ids.append(rel.id)
 
     result = await resolver.resolve(
         [g1, g2, g3],
@@ -4790,6 +4854,18 @@ async def test_that_dependency_any_group_filters_when_no_target_is_matched(
     assert result_ids == set()
 
     assert_resolutions(result, g1.id, [ResolutionKind.UNMET_DEPENDENCY_ANY])
+
+    # The resolution should list both OR-group targets as counterparts and
+    # reference one of the dependency relationships that contributed to the
+    # failure.
+    g1_res = get_resolutions_by_kind(result, g1.id, ResolutionKind.UNMET_DEPENDENCY_ANY)
+    assert len(g1_res) == 1
+    assert set(g1_res[0].details.counterparts) == {
+        ResolvedEntity.guideline(g2),
+        ResolvedEntity.guideline(g3),
+    }
+    assert g1_res[0].details.relationship is not None
+    assert g1_res[0].details.relationship.id in group_rel_ids
 
 
 async def test_that_mixed_dependency_all_and_dependency_any_requires_both(
@@ -5714,12 +5790,12 @@ async def test_that_priority_chain_attributes_to_direct_deprioritizer(
     # B deprioritized by A (direct)
     b_res = get_resolutions_by_kind(result, g_b.id, ResolutionKind.DEPRIORITIZED)
     assert len(b_res) == 1
-    assert g_a.id in b_res[0].details.target_ids
+    assert ResolvedEntity.guideline(g_a) in b_res[0].details.counterparts
 
     # C deprioritized by B (direct), NOT by A (transitive)
     c_res = get_resolutions_by_kind(result, g_c.id, ResolutionKind.DEPRIORITIZED)
     assert len(c_res) == 1
-    assert g_b.id in c_res[0].details.target_ids
+    assert ResolvedEntity.guideline(g_b) in c_res[0].details.counterparts
 
 
 async def test_that_transitive_deprioritized_dependency_records_only_direct_resolution(
@@ -5748,7 +5824,7 @@ async def test_that_transitive_deprioritized_dependency_records_only_direct_reso
     )
 
     # B depends on C
-    await relationship_store.create_relationship(
+    rel_b_c = await relationship_store.create_relationship(
         source=RelationshipEntity(id=g_b.id, kind=RelationshipEntityKind.GUIDELINE),
         target=RelationshipEntity(id=g_c.id, kind=RelationshipEntityKind.GUIDELINE),
         kind=RelationshipKind.DEPENDENCY,
@@ -5781,6 +5857,13 @@ async def test_that_transitive_deprioritized_dependency_records_only_direct_reso
     assert_resolutions(result, g_c.id, [ResolutionKind.DEPRIORITIZED])
     # B removed because its dependency (C) was deprioritized — single resolution
     assert_resolutions(result, g_b.id, [ResolutionKind.DEPRIORITIZED])
+    # B's transitive deprioritization should identify C as the counterpart and
+    # reference the B→C DEPENDENCY relationship that caused the cascade.
+    b_res = get_resolutions_by_kind(result, g_b.id, ResolutionKind.DEPRIORITIZED)
+    assert len(b_res) == 1
+    assert ResolvedEntity.guideline(g_c) in b_res[0].details.counterparts
+    assert b_res[0].details.relationship is not None
+    assert b_res[0].details.relationship.id == rel_b_c.id
     # A removed because its dependency (B) is gone — single resolution
     assert_resolutions(result, g_a.id, [ResolutionKind.UNMET_DEPENDENCY_ALL])
 
@@ -5995,8 +6078,20 @@ async def test_that_guideline_entailed_by_two_sources_records_both_entailment_re
     # Both entailment relationships should be referenced
     g3_res = get_resolutions_by_kind(result, g3.id, ResolutionKind.ENTAILED)
     assert len(g3_res) == 2
-    rel_ids = {r.details.relationship_id for r in g3_res}
+    for r in g3_res:
+        assert r.details.relationship is not None
+    rel_ids = {r.details.relationship.id for r in g3_res if r.details.relationship is not None}
     assert rel_ids == {r1.id, r2.id}
+
+    # Each ENTAILED resolution should also identify the entailing source
+    # guideline as a counterpart, paired with the matching relationship.
+    rel_to_counterparts = {
+        r.details.relationship.id: r.details.counterparts
+        for r in g3_res
+        if r.details.relationship is not None
+    }
+    assert rel_to_counterparts[r1.id] == (ResolvedEntity.guideline(g1),)
+    assert rel_to_counterparts[r2.id] == (ResolvedEntity.guideline(g2),)
 
 
 async def test_that_entailed_guideline_satisfies_dependency_of_matched_guideline(

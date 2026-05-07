@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from __future__ import annotations
+import asyncio
 from pprint import pformat
 import re
 import time
@@ -28,8 +29,17 @@ from pydantic import ValidationError
 import tiktoken
 
 from parlant.adapters.nlp.common import normalize_json_output, record_llm_metrics
+from parlant.core.agents import AgentStore
+from parlant.core.application_context import ApplicationContext
+from parlant.core.canned_responses import CannedResponseStore
+from parlant.core.context_variables import ContextVariableStore
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.glossary import GlossaryStore
+from parlant.core.guidelines import GuidelineStore
+from parlant.core.journeys import JourneyStore
 from parlant.core.loggers import Logger
+from parlant.core.relationships import RelationshipStore
+from parlant.core.services.tools.service_registry import ServiceRegistry
 from parlant.core.meter import Meter
 from parlant.core.nlp.policies import policy, retry
 from parlant.core.nlp.tokenization import EstimatingTokenizer
@@ -708,13 +718,124 @@ class JackalEmbedding(ParlantCloudEmbedder):
 
 
 class ParlantCloudIndexer(Indexer):
+    def __init__(
+        self,
+        agent_store: AgentStore,
+        guideline_store: GuidelineStore,
+        journey_store: JourneyStore,
+        relationship_store: RelationshipStore,
+        glossary_store: GlossaryStore,
+        context_variable_store: ContextVariableStore,
+        canned_response_store: CannedResponseStore,
+        service_registry: ServiceRegistry,
+        application_context: ApplicationContext,
+        logger: Logger,
+    ) -> None:
+        super().__init__(
+            agent_store=agent_store,
+            guideline_store=guideline_store,
+            journey_store=journey_store,
+            relationship_store=relationship_store,
+            glossary_store=glossary_store,
+            context_variable_store=context_variable_store,
+            canned_response_store=canned_response_store,
+            service_registry=service_registry,
+        )
+        self._application_context = application_context
+        self._logger = logger
+
     @override
     async def index(
         self,
         payload: Mapping[str, Mapping[str, IndexRequest]],
         progress_report: ProgressReport,
     ) -> None:
-        return
+        serialized_entities: dict[str, dict[str, dict[str, Any]]] = {
+            category: {
+                entity_id: {
+                    "type": request.type,
+                    "id": request.id,
+                    "last_modification_utc": request.last_modification_utc.isoformat(),
+                    "checksum": request.checksum,
+                    "data": request.data,
+                }
+                for entity_id, request in entities.items()
+            }
+            for category, entities in payload.items()
+        }
+
+        body = {
+            "instance_id": self._application_context.instance_id,
+            "entities": serialized_entities,
+        }
+
+        timeout = httpx.Timeout(connect=30.0, read=60.0, write=120.0, pool=5.0)
+
+        async with AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{BASE_URL}/v1/index",
+                headers={
+                    "Authorization": f"Bearer {os.environ['PARLANT_CLOUD_API_KEY']}",
+                    "X-Parlant-Version": VERSION,
+                },
+                json=body,
+            )
+
+            if response.is_error:
+                error_message, request_id = _get_error_detail(response)
+
+                if response.status_code == 429:
+                    raise RateLimitError(
+                        f"Parlant Cloud API rate limit exceeded: {error_message} (RID={request_id})"
+                    )
+                elif response.status_code == 402:
+                    raise InsufficientCreditsError(
+                        f"Insufficient API credits for Parlant Cloud API: {error_message} (RID={request_id})"
+                    )
+                elif response.status_code == 403:
+                    raise UnauthorizedError(
+                        f"Unauthorized access to Parlant Cloud API: {error_message} (RID={request_id})"
+                    )
+                else:
+                    raise ParlantCloudAPIError(
+                        f"Parlant Cloud API error: {response.status_code} {error_message} (RID={request_id})"
+                    )
+
+            status_url = response.json()["status_url"]
+            if not status_url.startswith("http"):
+                status_url = f"{BASE_URL}{status_url}"
+
+            last_completed = 0
+
+            while True:
+                status_response = await client.get(
+                    status_url,
+                    headers={
+                        "Authorization": f"Bearer {os.environ['PARLANT_CLOUD_API_KEY']}",
+                        "X-Parlant-Version": VERSION,
+                    },
+                )
+
+                if status_response.is_error:
+                    error_message, request_id = _get_error_detail(status_response)
+                    raise ParlantCloudAPIError(
+                        f"Parlant Cloud indexing status error: {status_response.status_code} {error_message} (RID={request_id})"
+                    )
+
+                status_data = status_response.json()
+                completed = int(status_data.get("completed", 0))
+                delta = completed - last_completed
+                if delta > 0:
+                    await progress_report.increment(delta)
+                    last_completed = completed
+
+                status = status_data.get("status")
+                if status == "completed":
+                    return
+                if status == "failed":
+                    raise ParlantCloudAPIError(f"Parlant Cloud indexing failed: {status_data}")
+
+                await asyncio.sleep(2)
 
 
 class ParlantCloudService(NLPService):
