@@ -373,7 +373,8 @@ class JourneyReachableNodesEvaluator:
                         ):
                             truncated_follow_ups[str(id)] = _ReachableFollowUps(
                                 condition=r.condition,
-                                path=r.path,
+                                # copy so a parent's prepend can't mutate the child's shared list
+                                path=list(r.path),
                             )
                             id += 1
                 children_info[child_idx] = _ChildInfo(
